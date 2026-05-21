@@ -44,7 +44,7 @@
       <div class="phone-screen">
         <div class="shell">
     <aside class="panel">
-      <nav class="mobile-panel-nav" aria-label="User panel sections">
+      <nav class="mobile-panel-nav" aria-label="User panel sections" data-admin-hidden>
         <button id="tab-request-btn" class="mobile-panel-tab is-active" type="button" data-user-panel-tab="request">Request</button>
         <button id="tab-driver-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="driver">Driver</button>
         <button id="tab-trip-btn" class="mobile-panel-tab" type="button" data-user-panel-tab="trip">Trip</button>
@@ -53,7 +53,7 @@
 
       <!-- Intro copy removed per request; UI will present strict step flow -->
 
-      <div class="control-group" data-mobile-section="request">
+      <div class="control-group" data-mobile-section="request" data-admin-hidden>
         <div class="flow-steps" aria-label="Ride request steps">
           <div id="step-vehicle" class="flow-step">
             <div class="flow-step__summary">
@@ -113,7 +113,7 @@
         </div>
       </div>
 
-      <div class="control-group offer-card" data-mobile-section="driver">
+      <div class="control-group offer-card" data-mobile-section="driver" data-admin-hidden>
         <p class="control-group__label">Suggested Driver</p>
         <strong id="offer-title-text">Choose pickup and drop-off first</strong>
         <small id="offer-detail-text" class="detail-text">The suggested driver profile will appear here before dispatch.</small>
@@ -141,9 +141,47 @@
         </div>
         <div class="button-row button-row--offer">
           <button id="accept-driver-btn" class="action-btn" type="button">Accept Driver</button>
+          <button id="ping-driver-btn" class="ghost-btn" type="button">Lock to Rider</button>
           <button id="other-driver-btn" class="ghost-btn" type="button">Suggest Other Driver</button>
           <button id="cancel-request-btn" class="ghost-btn" type="button">Cancel Request</button>
         </div>
+      </div>
+
+      <div class="control-group admin-filter-panel" data-admin-only>
+        <p class="control-group__label">Admin Driver Filters</p>
+        <div class="admin-filter-grid" aria-label="Filter visible riders by status">
+          <button class="admin-filter-btn is-active" type="button" data-admin-driver-filter="all">
+            <span class="admin-filter-dot admin-filter-dot--all"></span>
+            <span>All Active</span>
+            <strong id="filter-all-count">--</strong>
+          </button>
+          <button class="admin-filter-btn" type="button" data-admin-driver-filter="active">
+            <span class="admin-filter-dot admin-filter-dot--active"></span>
+            <span>Active</span>
+            <strong id="filter-active-count">--</strong>
+          </button>
+          <button class="admin-filter-btn" type="button" data-admin-driver-filter="standby_available">
+            <span class="admin-filter-dot admin-filter-dot--standby"></span>
+            <span>Standby</span>
+            <strong id="filter-standby-count">--</strong>
+          </button>
+          <button class="admin-filter-btn" type="button" data-admin-driver-filter="moving_available">
+            <span class="admin-filter-dot admin-filter-dot--moving"></span>
+            <span>Repositioning</span>
+            <strong id="filter-moving-count">--</strong>
+          </button>
+          <button class="admin-filter-btn" type="button" data-admin-driver-filter="assigned_pickup">
+            <span class="admin-filter-dot admin-filter-dot--pickup"></span>
+            <span>Going to Passenger</span>
+            <strong id="filter-pickup-count">--</strong>
+          </button>
+          <button class="admin-filter-btn" type="button" data-admin-driver-filter="assigned_ontrip">
+            <span class="admin-filter-dot admin-filter-dot--ontrip"></span>
+            <span>With Passenger</span>
+            <strong id="filter-ontrip-count">--</strong>
+          </button>
+        </div>
+        <small id="admin-filter-text" class="detail-text">Showing all active mock riders.</small>
       </div>
 
       <div class="stats">

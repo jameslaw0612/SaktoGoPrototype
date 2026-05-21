@@ -73,6 +73,7 @@ const chooseCarBtn = document.getElementById("choose-car-btn");
 const chooseMotorcycleBtn = document.getElementById("choose-motorcycle-btn");
 const rideTypePicker = document.querySelector('.ride-type-picker');
 const acceptDriverBtn = document.getElementById("accept-driver-btn");
+const pingDriverBtn = document.getElementById("ping-driver-btn");
 const otherDriverBtn = document.getElementById("other-driver-btn");
 const cancelRequestBtn = document.getElementById("cancel-request-btn");
 const stepVehicle = document.getElementById("step-vehicle");
@@ -93,6 +94,16 @@ const phoneFrame = document.querySelector(".phone-frame");
 const phoneShell = document.querySelector(".phone-shell");
 const phoneScreen = document.querySelector(".phone-screen");
 const appShell = document.querySelector(".shell");
+const adminDriverFilterBtns = document.querySelectorAll("[data-admin-driver-filter]");
+const adminFilterText = document.getElementById("admin-filter-text");
+const adminFilterCountEls = {
+  all: document.getElementById("filter-all-count"),
+  active: document.getElementById("filter-active-count"),
+  standby_available: document.getElementById("filter-standby-count"),
+  moving_available: document.getElementById("filter-moving-count"),
+  assigned_pickup: document.getElementById("filter-pickup-count"),
+  assigned_ontrip: document.getElementById("filter-ontrip-count")
+};
 
 const map = L.map("map", {
   zoomControl: true,
@@ -125,9 +136,12 @@ const state = {
   trafficCache: new Map(),
   landmarks: [],
   drivers: [],
+  roadNetworkDrawn: false,
+  roadNetworkDrawHandle: null,
   driverAnimationHandle: null,
   lastDriverTick: null,
   usingPythonBackend: false,
+  adminDriverFilter: "all",
   browserLocation: null,
   browserLocationCentered: false,
   browserLocationMarker: null,
@@ -147,6 +161,8 @@ const state = {
   ridePhase: "idle",
   offeredDriverId: null,
   selectedDriverId: null,
+  lockedRiderId: null,
+  lockedRiderLastPanAt: 0,
   matchingRequestSerial: 0,
   isRankingDrivers: false,
   viewMode: null,
@@ -169,6 +185,7 @@ resetBtn.addEventListener("click", () => resetSelections());
 chooseCarBtn.addEventListener("click", () => setVehicleType("car"));
 chooseMotorcycleBtn.addEventListener("click", () => setVehicleType("motorcycle"));
 acceptDriverBtn.addEventListener("click", () => acceptPendingDriverOffer());
+pingDriverBtn.addEventListener("click", () => toggleRiderLock());
 otherDriverBtn.addEventListener("click", () => suggestOtherDriver());
 cancelRequestBtn.addEventListener("click", () => resetSelections());
 enterUserBtn.addEventListener("click", () => setEntryMode("user"));
@@ -177,6 +194,9 @@ tabRequestBtn.addEventListener("click", () => setUserPanelTab("request"));
 tabDriverBtn.addEventListener("click", () => setUserPanelTab("driver"));
 tabTripBtn.addEventListener("click", () => setUserPanelTab("trip"));
 tabMoreBtn.addEventListener("click", () => setUserPanelTab("more"));
+for (const button of adminDriverFilterBtns) {
+  button.addEventListener("click", () => setAdminDriverFilter(button.dataset.adminDriverFilter || "all"));
+}
 
 map.on("click", (event) => {
   if (!state.graph.size) {
@@ -238,6 +258,10 @@ function setEntryMode(mode) {
   document.body.dataset.userPanel = state.userPanelTab;
   syncShellPlacement(mode);
 
+  if (mode === "user") {
+    requestBrowserLocation();
+  }
+
   if (entryOverlay) {
     if (entryOverlay.contains(document.activeElement)) {
       document.activeElement.blur();
@@ -259,11 +283,13 @@ function setEntryMode(mode) {
   window.setTimeout(() => {
     map.invalidateSize();
     if (mode === "user" && centerUserModeOnBrowserLocation()) {
+      scheduleRoadNetworkDrawForUserMode();
       return;
     }
 
     if (state.userPoint) {
       map.panTo([state.userPoint.lat, state.userPoint.lng], { animate: false });
+      scheduleRoadNetworkDrawForUserMode();
       return;
     }
 
@@ -271,15 +297,17 @@ function setEntryMode(mode) {
       map.fitBounds(state.bounds, {
         padding: [24, 24]
       });
+      scheduleRoadNetworkDrawForUserMode();
       return;
     }
 
     map.setView(INITIAL_CENTER, INITIAL_ZOOM);
+    scheduleRoadNetworkDrawForUserMode();
   }, 60);
 
   setStatus(mode === "user"
     ? "User mode selected. Phone-style layout is now active."
-    : "Admin mode selected. Full web layout is now active.");
+    : "Admin mode selected. Monitoring layout is now active.");
   updateRequestUI();
 }
 
@@ -290,6 +318,17 @@ function setUserPanelTab(tab) {
   }
 
   updateUserPanelTabs();
+}
+
+function setAdminDriverFilter(filter) {
+  state.adminDriverFilter = filter;
+  updateAdminDriverFilterUI();
+
+  for (const driver of state.drivers) {
+    updateDriverMarker(driver);
+  }
+
+  updateMapLegend();
 }
 
 function showLoadingOverlay(message = null) {
@@ -449,6 +488,70 @@ function getMapLegendCounts() {
     matchedDriver: state.selectedDriverId ? 1 : 0,
     userLocation: state.userPoint ? 1 : 0
   };
+}
+
+function updateAdminDriverFilterUI() {
+  if (!adminDriverFilterBtns.length) {
+    return;
+  }
+
+  const counts = getAdminDriverFilterCounts();
+  for (const button of adminDriverFilterBtns) {
+    const filter = button.dataset.adminDriverFilter || "all";
+    button.classList.toggle("is-active", state.adminDriverFilter === filter);
+    button.setAttribute("aria-pressed", state.adminDriverFilter === filter ? "true" : "false");
+  }
+
+  for (const [filter, element] of Object.entries(adminFilterCountEls)) {
+    if (element) {
+      element.textContent = String(counts[filter] ?? 0);
+    }
+  }
+
+  if (adminFilterText) {
+    const label = getAdminDriverFilterLabel(state.adminDriverFilter);
+    const visibleCount = counts[state.adminDriverFilter] ?? counts.all;
+    adminFilterText.textContent = `Showing ${visibleCount.toLocaleString()} ${label.toLowerCase()} rider${visibleCount === 1 ? "" : "s"}.`;
+  }
+}
+
+function getAdminDriverFilterCounts() {
+  const counts = summarizeDrivers();
+  return {
+    all: counts.active,
+    active: counts.availableStandby + counts.availableMoving,
+    standby_available: counts.availableStandby,
+    moving_available: counts.availableMoving,
+    assigned_pickup: counts.assignedPickup,
+    assigned_ontrip: counts.assignedOnTrip
+  };
+}
+
+function getAdminDriverFilterLabel(filter) {
+  const labels = {
+    all: "all active",
+    active: "active available",
+    standby_available: "standby",
+    moving_available: "repositioning",
+    assigned_pickup: "going to passenger",
+    assigned_ontrip: "with passenger"
+  };
+  return labels[filter] || labels.all;
+}
+
+function doesDriverMatchAdminFilter(driver) {
+  switch (state.adminDriverFilter) {
+    case "active":
+      return driver.status === "standby_available" || driver.status === "moving_available";
+    case "standby_available":
+    case "moving_available":
+    case "assigned_pickup":
+    case "assigned_ontrip":
+      return driver.status === state.adminDriverFilter;
+    case "all":
+    default:
+      return true;
+  }
 }
 
 function setSelectionMode(mode) {
@@ -692,11 +795,15 @@ function updateRequestUI() {
   chooseCarBtn.disabled = activeRide;
   chooseMotorcycleBtn.disabled = activeRide;
   acceptDriverBtn.disabled = !hasOffer || activeRide;
+  pingDriverBtn.disabled = !getLockableRider();
+  pingDriverBtn.classList.toggle("is-active", Boolean(state.lockedRiderId));
+  pingDriverBtn.setAttribute("aria-pressed", state.lockedRiderId ? "true" : "false");
   otherDriverBtn.disabled = !hasOffer || activeRide;
   cancelRequestBtn.disabled = !hasPickup && !hasDropoff && !hasOffer && !activeRide;
   pickMeBtn.textContent = hasPickup ? "Change Pickup" : "Set Pickup";
   findDriverBtn.textContent = hasDropoff ? "Change Drop-off" : "Set Drop-off";
   resetBtn.textContent = hasPickup || hasDropoff || hasOffer || activeRide ? "Clear Request" : "Reset";
+  pingDriverBtn.textContent = state.lockedRiderId ? "Unlock Rider" : "Lock to Rider";
   otherDriverBtn.textContent = hasOffer ? "See Next Driver" : "Suggest Other Driver";
   cancelRequestBtn.textContent = activeRide ? "Ride Active" : "Cancel Request";
   if (state.viewMode === "user") {
@@ -830,7 +937,7 @@ function normalizeUiCopy() {
     .replaceAll("â€", '"')
     .replaceAll("“", '"')
     .replaceAll("”", '"');
-  for (const target of [offerDetailText, offerComparisonText, offerReasonText]) {
+  for (const target of [offerDetailText].filter(Boolean)) {
     target.textContent = target.textContent
       .replaceAll("â€¢", "|")
       .replaceAll("•", "|");
@@ -840,21 +947,21 @@ function normalizeUiCopy() {
 async function initialize() {
   startClock();
   setWeatherText("Loading weather...");
-  requestBrowserLocation();
 
   if (shouldUsePythonBackend()) {
     try {
     setStatus("Loading data from the backend...");
     const bootstrap = await fetchBootstrap();
     applyBootstrapPayload(bootstrap);
-    drawRoadNetwork();
     drawLandmarks();
     initializeDrivers();
+    updateMapPrivacyLayers();
     startDriverSimulation();
     window.setInterval(() => loadWeather(), 600000);
     state.appReady = true;
     setStatus(`Ready. Loaded ${state.graph.size.toLocaleString()} routable road nodes and ${state.landmarks.length.toLocaleString()} driver hotspots.`);
     hideLoadingOverlay();
+    scheduleRoadNetworkDrawForUserMode();
     return;
     } catch (error) {
       console.warn("Python backend bootstrap unavailable, falling back to browser-side loading.", error);
@@ -871,18 +978,19 @@ async function initialize() {
   setStatus("Loading street network...");
   const overpassData = await fetchRoadNetwork(boundary.boundingbox);
   buildGraph(overpassData);
-  drawRoadNetwork();
 
   setStatus("Loading landmark hotspots for the driver simulation...");
   const landmarkData = await fetchLandmarkData(boundary.boundingbox);
   buildLandmarks(landmarkData);
   drawLandmarks();
   initializeDrivers();
+  updateMapPrivacyLayers();
   startDriverSimulation();
 
   state.appReady = true;
   setStatus(`Ready. Loaded ${state.graph.size.toLocaleString()} routable road nodes and ${state.landmarks.length.toLocaleString()} driver hotspots.`);
   hideLoadingOverlay();
+  scheduleRoadNetworkDrawForUserMode();
 }
 
 function shouldUsePythonBackend() {
@@ -1307,6 +1415,8 @@ function buildGraph(overpassData) {
   state.nodeIndex.clear();
   state.roadSegments = [];
   state.routeCache.clear();
+  state.roadNetworkDrawn = false;
+  networkLayer.clearLayers();
 
   for (const way of ways) {
     const tags = way.tags || {};
@@ -1346,6 +1456,8 @@ function buildGraphFromPayload(nodes, graph, roads) {
   state.nodeIndex.clear();
   state.roadSegments = [];
   state.routeCache.clear();
+  state.roadNetworkDrawn = false;
+  networkLayer.clearLayers();
 
   for (const node of nodes) {
     state.nodeIndex.set(String(node.id), {
@@ -1488,6 +1600,28 @@ function addEdge(fromNode, toNode, distance) {
   });
 }
 
+function scheduleRoadNetworkDrawForUserMode() {
+  if (state.viewMode !== "user" || state.roadNetworkDrawn || state.roadNetworkDrawHandle || !state.graph.size) {
+    return;
+  }
+
+  const drawWhenIdle = () => {
+    state.roadNetworkDrawHandle = null;
+    if (state.viewMode !== "user" || state.roadNetworkDrawn || !state.graph.size) {
+      return;
+    }
+
+    drawRoadNetwork();
+  };
+
+  if ("requestIdleCallback" in window) {
+    state.roadNetworkDrawHandle = window.requestIdleCallback(drawWhenIdle, { timeout: 1500 });
+    return;
+  }
+
+  state.roadNetworkDrawHandle = window.setTimeout(drawWhenIdle, 100);
+}
+
 function drawRoadNetwork() {
   networkLayer.clearLayers();
 
@@ -1531,9 +1665,16 @@ function drawRoadNetwork() {
         .addTo(networkLayer);
     }
   }
+
+  state.roadNetworkDrawn = true;
 }
 
 function handleUserRoadSelection(latlng, preferredSegment = null) {
+  if (state.viewMode !== "user") {
+    setStatus("Admin map is monitoring only. Enter User mode to create a ride request.");
+    return;
+  }
+
   if (!state.selectionMode) {
     setStatus("Please choose a ride type first.");
     return;
@@ -1670,6 +1811,8 @@ function resetSelections() {
   state.ridePhase = "idle";
   state.offeredDriverId = null;
   state.selectedDriverId = null;
+  state.lockedRiderId = null;
+  state.lockedRiderLastPanAt = 0;
   userLocationText.textContent = "Not selected";
   dropoffLocationText.textContent = "Not selected";
   bestDriverText.textContent = "Waiting for driver suggestion";
@@ -1861,6 +2004,8 @@ function releaseSelectedDriver() {
   }
 
   state.selectedDriverId = null;
+  state.lockedRiderId = null;
+  state.lockedRiderLastPanAt = 0;
 }
 
 function holdDriverForOffer(driver) {
@@ -1894,6 +2039,8 @@ function clearPendingDriverOffer(clearSelection = true) {
 
   if (clearSelection && state.selectedDriverId && !state.drivers.find((driver) => driver.id === state.selectedDriverId)?.lockedToUser) {
     state.selectedDriverId = null;
+    state.lockedRiderId = null;
+    state.lockedRiderLastPanAt = 0;
   }
 
   for (const driver of state.drivers) {
@@ -2409,6 +2556,64 @@ function acceptPendingDriverOffer() {
   setStatus(`Driver ${offer.driver.id} accepted. They are now heading to your pickup point.`);
 }
 
+function getLockableRider() {
+  if (state.viewMode !== "user") {
+    return null;
+  }
+
+  if (state.selectedDriverId) {
+    const selectedDriver = state.drivers.find((driver) => driver.id === state.selectedDriverId);
+    if (selectedDriver?.lockedToUser) {
+      return selectedDriver;
+    }
+  }
+
+  return null;
+}
+
+function toggleRiderLock() {
+  const driver = getLockableRider();
+  if (!driver) {
+    setStatus("Accept a driver first before locking to the rider.");
+    return;
+  }
+
+  if (state.lockedRiderId === driver.id) {
+    state.lockedRiderId = null;
+    state.lockedRiderLastPanAt = 0;
+    driverTrafficText.textContent = `Unlocked from Driver ${driver.id}.`;
+    offerDetailText.textContent = `Map lock released. Driver ${driver.id} will keep moving normally.`;
+    setStatus(`Unlocked from Driver ${driver.id}.`);
+    updateRequestUI();
+    return;
+  }
+
+  lockToRider(driver);
+}
+
+function lockToRider(driver) {
+  state.lockedRiderId = driver.id;
+  state.lockedRiderLastPanAt = 0;
+  driver.marker.openPopup();
+  map.panTo([driver.lat, driver.lng], { animate: true, duration: 0.25 });
+
+  const lockContext = state.ridePhase === "on_trip"
+    ? "The map will follow your rider during the trip."
+    : "The map will follow your rider while they head to pickup.";
+  driverTrafficText.textContent = `Locked to Driver ${driver.id}. ${lockContext}`;
+  offerDetailText.textContent = `Locked to Driver ${driver.id}. ${lockContext}`;
+  setStatus(`Locked to Driver ${driver.id}.`);
+  updateRequestUI();
+}
+
+function handleDriverMarkerClick(driver) {
+  if (state.viewMode !== "user" || driver.id !== state.selectedDriverId || !driver.lockedToUser) {
+    return;
+  }
+
+  lockToRider(driver);
+}
+
 function suggestOtherDriverLegacy() {
   if (!state.pendingDriverOffer) {
     return;
@@ -2461,6 +2666,28 @@ function syncMatchedDriverRoute() {
   const remainingDistance = getDriverRemainingDistance(driver);
   const etaMinutes = Math.max(1, Math.round((remainingDistance / 1000 / DRIVER_SPEED_KPH) * 60));
   routeText.textContent = `${activeLabel}: ${(remainingDistance / 1000).toFixed(2)} km, approx ${etaMinutes} min`;
+}
+
+function syncLockedRiderCamera() {
+  if (!state.lockedRiderId || state.viewMode !== "user") {
+    return;
+  }
+
+  const driver = state.drivers.find((candidate) => candidate.id === state.lockedRiderId);
+  if (!driver || !driver.lockedToUser) {
+    state.lockedRiderId = null;
+    state.lockedRiderLastPanAt = 0;
+    updateRequestUI();
+    return;
+  }
+
+  const now = performance.now();
+  if (now - state.lockedRiderLastPanAt < 350) {
+    return;
+  }
+
+  state.lockedRiderLastPanAt = now;
+  map.panTo([driver.lat, driver.lng], { animate: false });
 }
 
 function buildActiveDriverRouteLine(driver) {
@@ -2816,11 +3043,14 @@ function initializeDrivers() {
   shuffleArray(driverTypes);
 
   for (let index = 0; index < DRIVER_TOTAL; index += 1) {
-    const marker = L.circleMarker(INITIAL_CENTER, getDriverMarkerStyle("inactive", driverTypes[index]))
+    const marker = L.circleMarker(INITIAL_CENTER, {
+      ...getDriverMarkerStyle("inactive", driverTypes[index]),
+      bubblingMouseEvents: false
+    })
       .bindPopup("")
       .addTo(driverLayer);
 
-    state.drivers.push({
+    const driver = {
       id: index + 1,
       type: driverTypes[index],
       status: "inactive",
@@ -2839,7 +3069,15 @@ function initializeDrivers() {
       lockedToUser: false,
       lat: INITIAL_CENTER[0],
       lng: INITIAL_CENTER[1]
+    };
+
+    marker.on("click", (event) => {
+      if (event.originalEvent) {
+        L.DomEvent.stop(event.originalEvent);
+      }
+      handleDriverMarkerClick(driver);
     });
+    state.drivers.push(driver);
   }
 
   reconcileDriverTargets(true);
@@ -2982,6 +3220,7 @@ function updateDriverPositions(deltaSeconds) {
   }
 
   syncMatchedDriverRoute();
+  syncLockedRiderCamera();
 }
 
 function getDriverTargets() {
@@ -3071,6 +3310,7 @@ function updateDriverSummary(targets = getDriverTargets()) {
   const counts = summarizeDrivers();
   driverSummaryText.textContent = `${counts.active} active now: ${counts.availableStandby} standby, ${counts.availableMoving} repositioning, ${counts.assignedPickup} going to passenger, ${counts.assignedOnTrip} on-trip`;
   driverBreakdownText.textContent = `Target now: ${targets.active} active. 60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you, speed = ${DRIVER_SPEED_KPH} km/h.`;
+  updateAdminDriverFilterUI();
   updateMapLegend();
 }
 
@@ -3082,6 +3322,11 @@ function findDriverToDeactivate() {
 }
 
 function deactivateDriver(driver) {
+  if (state.lockedRiderId === driver.id) {
+    state.lockedRiderId = null;
+    state.lockedRiderLastPanAt = 0;
+  }
+
   driver.status = "inactive";
   driver.routeNodeIds = [];
   driver.routeSegmentIndex = 0;
@@ -3273,6 +3518,8 @@ function handleDriverArrival(driver) {
     bestDriverText.textContent = `Driver ${driver.id} completed your ride`;
     driverTrafficText.textContent = "Trip finished. You can start a new request anytime.";
     state.userPanelTab = "trip";
+    state.lockedRiderId = null;
+    state.lockedRiderLastPanAt = 0;
     updateOfferCard("Ride complete", "Your driver reached the drop-off point. Set a new pickup to request another ride.");
     setStatus(`Driver ${driver.id} reached your drop-off point.`);
     driver.lockedToUser = false;
@@ -3418,10 +3665,26 @@ function getDriverMarkerStyle(status, type, isSelected = false) {
 }
 
 function updateDriverMarker(driver) {
+  const isFilteredOut = state.viewMode === "admin" && !doesDriverMatchAdminFilter(driver);
+  const isHiddenForUserPrivacy = state.viewMode === "user" && driver.id !== state.selectedDriverId;
   driver.marker.setLatLng([driver.lat, driver.lng]);
-  driver.marker.setStyle(getDriverMarkerStyle(driver.status, driver.type, driver.id === state.selectedDriverId));
+  driver.marker.setStyle(isFilteredOut
+    ? {
+      radius: driver.type === "car" ? 7 : 5,
+      color: "#ffffff",
+      weight: 1,
+      opacity: 0,
+      fillColor: "#ffffff",
+      fillOpacity: 0
+    }
+    : getDriverMarkerStyle(driver.status, driver.type, driver.id === state.selectedDriverId));
   driver.marker.setPopupContent(buildDriverPopup(driver));
-  if (state.viewMode === "user" && driver.id !== state.selectedDriverId) {
+  const markerElement = driver.marker.getElement?.() || driver.marker._path;
+  if (markerElement) {
+    markerElement.style.pointerEvents = isFilteredOut || isHiddenForUserPrivacy ? "none" : "";
+  }
+
+  if (isFilteredOut || isHiddenForUserPrivacy) {
     driver.marker.closePopup();
   }
 }
@@ -3437,7 +3700,7 @@ function buildDriverPopup(driver) {
 
   const landmark = getLandmarkById(driver.targetLandmarkId);
   const selectedText = driver.id === state.selectedDriverId
-    ? `<br>${driver.lockedToUser ? "Matched to you" : "Suggested to you"}`
+    ? `<br>${driver.lockedToUser ? "Matched to you" : "Suggested to you"}${state.lockedRiderId === driver.id ? "<br>Map locked to this rider" : ""}`
     : "";
   const landmarkText = landmark ? `<br>Target: ${landmark.name}` : "";
   return `<strong>Driver ${driver.id}</strong><br>${driver.type === "car" ? "Car" : "Motorcycle"}<br>${stateLabelMap[driver.status] || driver.status}${selectedText}${landmarkText}`;

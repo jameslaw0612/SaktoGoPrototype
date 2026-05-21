@@ -6,6 +6,7 @@ import json
 import math
 import sys
 import threading
+import time
 from dataclasses import asdict, dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,6 +29,7 @@ LANDMARK_TOURISM_REGEX = "attraction|museum|hotel"
 USER_POINT_NODE_ID = "__user_point__"
 STATIC_ROOT = Path(__file__).resolve().parent
 PASSENGER_DRIVER_MODULE_PATH = STATIC_ROOT / "passenger-driver.py"
+WEATHER_CACHE_TTL_SECONDS = 600
 
 
 def load_passenger_driver_module() -> Any:
@@ -92,6 +94,8 @@ class OlongapoRouteService:
         self.road_segments: list[RoadSegment] = []
         self.landmarks: list[Landmark] = []
         self.route_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
+        self.weather_cache: dict[str, Any] | None = None
+        self.weather_cache_time = 0.0
 
     def ensure_bootstrapped(self) -> None:
         if self.boundary and self.graph and self.landmarks:
@@ -192,6 +196,10 @@ class OlongapoRouteService:
 
     def load_weather(self) -> dict[str, Any]:
         self.ensure_bootstrapped()
+        now = time.monotonic()
+        if self.weather_cache and now - self.weather_cache_time < WEATHER_CACHE_TTL_SECONDS:
+            return dict(self.weather_cache)
+
         params = urlencode(
             {
                 "latitude": str(self.center_point["lat"]),
@@ -205,12 +213,15 @@ class OlongapoRouteService:
         if not current:
             raise RuntimeError("Weather payload missing current data.")
 
-        return {
+        weather = {
             "raw": current,
             "summary": f"{describe_weather_code(current['weather_code'], current.get('is_day', 1))}, "
             f"{round(current['temperature_2m'])} deg C, feels like {round(current['apparent_temperature'])} deg C, "
             f"wind {round(current['wind_speed_10m'])} km/h",
         }
+        self.weather_cache = weather
+        self.weather_cache_time = now
+        return weather
 
     def build_graph(self, overpass_data: dict[str, Any]) -> None:
         raw_nodes: dict[int, Node] = {}
