@@ -9,6 +9,12 @@ from zoneinfo import ZoneInfo
 
 MATCH_DEFAULT_RADIUS_METERS = 3000
 MATCH_EXPANDED_RADIUS_METERS = 5000
+MATCH_MAX_RADIUS_METERS = 10000
+MATCH_SERVICE_RADII_METERS = (
+    MATCH_DEFAULT_RADIUS_METERS,
+    MATCH_EXPANDED_RADIUS_METERS,
+    MATCH_MAX_RADIUS_METERS,
+)
 MATCH_TRAFFIC_FALLBACK_RATIO = 0.72
 MATCH_TRAFFIC_SAMPLE_COUNT = 3
 DRIVER_SPEED_KPH = 25
@@ -83,7 +89,7 @@ def rank_drivers(
     radius_meters = MATCH_DEFAULT_RADIUS_METERS
     pickup_node = node_index[USER_POINT_NODE_ID]
 
-    for search_radius in (MATCH_DEFAULT_RADIUS_METERS, MATCH_EXPANDED_RADIUS_METERS):
+    for search_radius in MATCH_SERVICE_RADII_METERS:
         eligible_drivers = [
             driver
             for driver in drivers
@@ -100,10 +106,10 @@ def rank_drivers(
             "baselineCandidate": None,
             "radiusMeters": radius_meters,
             "reasonTitle": "No nearby eligible driver",
-            "reasonDetail": f"No {vehicle_label} driver passed the current availability rules within 5.0 km.",
+            "reasonDetail": f"No {vehicle_label} driver passed the current availability rules within {radius_meters / 1000:.1f} km.",
             "offerTitle": "No driver found within service range",
-            "offerDetail": "We checked 3 km first, then expanded to 5 km, but no nearby driver met the vehicle, radius, route, and availability requirements.",
-            "statusMessage": "No eligible driver met the matching rules within 5 km.",
+            "offerDetail": "We checked 3 km first, then expanded to 5 km and 10 km, but no nearby driver met the vehicle, radius, route, and availability requirements.",
+            "statusMessage": f"No eligible driver met the matching rules within {radius_meters / 1000:.0f} km.",
             "matchingMode": "backend_primary",
         }
 
