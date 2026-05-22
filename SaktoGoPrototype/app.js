@@ -8,19 +8,22 @@ const OLONGAPO_TIMEZONE = "Asia/Manila";
 const TRAFFIC_POINT_NEARBY_CANDIDATES = 4;
 const TRAFFIC_ROUTE_NEARBY_CANDIDATES = 2;
 const TRAFFIC_NEARBY_RADIUS_METERS = 500;
-const DRIVER_TRAFFIC_REFRESH_INTERVAL_MS = 12000;
-const DRIVER_TRAFFIC_REFRESH_BATCH_SIZE = 20;
-const DRIVER_TRAFFIC_NEARBY_CANDIDATES = 1;
-const DRIVER_SEGMENT_TRAFFIC_REFRESH_COOLDOWN_MS = 3500;
 const MATCH_DEBUG_ENABLED = new URLSearchParams(window.location.search).has("debugMatch");
 const DRIVER_TOTAL = 100;
 const DRIVER_CAR_COUNT = 60;
 const DRIVER_MOTORCYCLE_COUNT = 40;
 const DRIVER_SPEED_KPH = 25;
+const DRIVER_SPEED_MPS = (DRIVER_SPEED_KPH * 1000) / 3600;
 const DRIVER_RECONCILE_INTERVAL_MS = 2500;
 const MOCK_DRIVER_RANDOM_SEED = 20260522;
 const MATCH_DEFAULT_RADIUS_METERS = 3000;
 const MATCH_EXPANDED_RADIUS_METERS = 5000;
+const MATCH_MAX_RADIUS_METERS = 10000;
+const MATCH_SERVICE_RADII_METERS = [
+  MATCH_DEFAULT_RADIUS_METERS,
+  MATCH_EXPANDED_RADIUS_METERS,
+  MATCH_MAX_RADIUS_METERS
+];
 const MATCH_TRAFFIC_FALLBACK_RATIO = 0.72;
 const LOCATION_NEAR_OLONGAPO_RADIUS_METERS = 8000;
 const DRIVER_ACTIVITY_SCHEDULE = [
@@ -40,6 +43,35 @@ const LANDMARK_TOURISM_REGEX = "attraction|museum|hotel";
 const LANDMARK_SEARCH_RADIUS_METERS = 900;
 const USER_POINT_NODE_ID = "__user_point__";
 const DROPOFF_POINT_NODE_ID = "__dropoff_point__";
+const ROAD_TYPE_COLORS = {
+  motorway: "#d94841",
+  motorway_link: "#de6a5f",
+  trunk: "#e76f51",
+  trunk_link: "#ef8a62",
+  primary: "#f4a261",
+  primary_link: "#f6b26b",
+  secondary: "#e9c46a",
+  secondary_link: "#edd382",
+  tertiary: "#4f7cac",
+  tertiary_link: "#6791bf",
+  residential: "#2a9d8f",
+  living_street: "#3cb7a8",
+  unclassified: "#5c8d89",
+  service: "#7f5539",
+  road: "#6c757d"
+};
+const ROAD_TYPE_LEGEND_ORDER = [
+  "motorway",
+  "trunk",
+  "primary",
+  "secondary",
+  "tertiary",
+  "residential",
+  "service",
+  "living_street",
+  "road",
+  "unclassified"
+];
 let mockDriverRandomState = MOCK_DRIVER_RANDOM_SEED;
 
 const statusText = document.getElementById("status-text");
@@ -66,6 +98,13 @@ const offerEtaText = document.getElementById("offer-eta-text");
 const offerBaselineText = document.getElementById("offer-baseline-text");
 const offerBaselineDistanceText = document.getElementById("offer-baseline-distance-text");
 const offerReasonList = document.getElementById("offer-reason-list");
+const pickupSuggestionCard = document.getElementById("pickup-suggestion-card");
+const pickupSuggestionTitle = document.getElementById("pickup-suggestion-title");
+const pickupSuggestionDetail = document.getElementById("pickup-suggestion-detail");
+const pickupSuggestionWalk = document.getElementById("pickup-suggestion-walk");
+const pickupSuggestionEta = document.getElementById("pickup-suggestion-eta");
+const pickupSuggestionRoad = document.getElementById("pickup-suggestion-road");
+const pickupSuggestionReason = document.getElementById("pickup-suggestion-reason");
 const rideTypeText = document.getElementById("ride-type-text");
 const pickMeBtn = document.getElementById("pick-me-btn");
 const findDriverBtn = document.getElementById("find-driver-btn");
@@ -76,6 +115,8 @@ const rideTypePicker = document.querySelector('.ride-type-picker');
 const acceptDriverBtn = document.getElementById("accept-driver-btn");
 const otherDriverBtn = document.getElementById("other-driver-btn");
 const cancelRequestBtn = document.getElementById("cancel-request-btn");
+const useSuggestedPickupBtn = document.getElementById("use-suggested-pickup-btn");
+const keepOriginalPickupBtn = document.getElementById("keep-original-pickup-btn");
 const stepVehicle = document.getElementById("step-vehicle");
 const stepPickup = document.getElementById("step-pickup");
 const stepDropoff = document.getElementById("step-dropoff");
@@ -89,6 +130,9 @@ const enterUserBtn = document.getElementById("enter-user-btn");
 const enterAdminBtn = document.getElementById("enter-admin-btn");
 const loadingOverlay = document.getElementById("loading-overlay");
 const loadingStatusText = document.getElementById("loading-status-text");
+const matchLoadingOverlay = document.getElementById("match-loading-overlay");
+const matchLoadingTitle = document.getElementById("match-loading-title");
+const matchLoadingText = document.getElementById("match-loading-text");
 const desktopShellHost = document.getElementById("desktop-shell-host");
 const phoneFrame = document.querySelector(".phone-frame");
 const phoneShell = document.querySelector(".phone-shell");
@@ -127,9 +171,6 @@ const state = {
   landmarks: [],
   drivers: [],
   driverAnimationHandle: null,
-  driverTrafficRefreshHandle: null,
-  driverTrafficRefreshCursor: 0,
-  isRefreshingDriverTraffic: false,
   lastDriverTick: null,
   usingPythonBackend: false,
   browserLocation: null,
@@ -143,6 +184,7 @@ const state = {
   selectionMode: null,
   selectedVehicleType: null,
   pendingDriverOffer: null,
+  smartPickupRecommendation: null,
   rankedDriverSuggestions: [],
   rejectedDriverIds: new Set(),
   suggestionCursor: 0,
@@ -152,6 +194,8 @@ const state = {
   offeredDriverId: null,
   selectedDriverId: null,
   matchingRequestSerial: 0,
+  matchLoadingRequestSerial: 0,
+  matchLoadingPhaseTimer: null,
   isRankingDrivers: false,
   viewMode: null,
   userPanelTab: "request",
@@ -164,6 +208,7 @@ const state = {
   },
   backendSupportsIntelligentMatch: true,
   backendSupportsTrafficProxy: false,
+  browserLocationRequestInFlight: false,
   centerPoint: {
     lat: INITIAL_CENTER[0],
     lng: INITIAL_CENTER[1]
@@ -178,6 +223,8 @@ chooseMotorcycleBtn.addEventListener("click", () => setVehicleType("motorcycle")
 acceptDriverBtn.addEventListener("click", () => acceptPendingDriverOffer());
 otherDriverBtn.addEventListener("click", () => suggestOtherDriver());
 cancelRequestBtn.addEventListener("click", () => resetSelections());
+if (useSuggestedPickupBtn) useSuggestedPickupBtn.addEventListener("click", () => applySuggestedPickupRecommendation());
+if (keepOriginalPickupBtn) keepOriginalPickupBtn.addEventListener("click", () => dismissSmartPickupRecommendation(false));
 enterUserBtn.addEventListener("click", () => setEntryMode("user"));
 enterAdminBtn.addEventListener("click", () => setEntryMode("admin"));
 tabRequestBtn.addEventListener("click", () => setUserPanelTab("request"));
@@ -263,7 +310,15 @@ function setEntryMode(mode) {
     hideLoadingOverlay();
   }
 
+  if (mode !== "user") {
+    hideMatchLoadingOverlay(null, true);
+  }
+
   updateMapPrivacyLayers();
+
+  if (mode === "user" && !state.browserLocation) {
+    requestBrowserLocation();
+  }
 
   window.setTimeout(() => {
     map.invalidateSize();
@@ -325,6 +380,68 @@ function hideLoadingOverlay() {
   loadingOverlay.style.display = "none";
 }
 
+function showMatchLoadingOverlay(requestSerial, title = "Finding the best driver", detail = "Checking route distance, traffic, weather, reliability, and movement.") {
+  if (!matchLoadingOverlay || state.viewMode !== "user") {
+    return;
+  }
+
+  if (state.matchLoadingPhaseTimer) {
+    window.clearTimeout(state.matchLoadingPhaseTimer);
+    state.matchLoadingPhaseTimer = null;
+  }
+
+  state.matchLoadingRequestSerial = requestSerial;
+  if (matchLoadingTitle) {
+    matchLoadingTitle.textContent = title;
+  }
+  if (matchLoadingText) {
+    matchLoadingText.textContent = detail;
+  }
+
+  matchLoadingOverlay.hidden = false;
+
+  state.matchLoadingPhaseTimer = window.setTimeout(() => {
+    if (state.matchLoadingRequestSerial !== requestSerial || matchLoadingOverlay.hidden) {
+      return;
+    }
+
+    if (matchLoadingText) {
+      matchLoadingText.textContent = `No strong match yet within ${(MATCH_DEFAULT_RADIUS_METERS / 1000).toFixed(0)} km. Expanding the search to ${(MATCH_EXPANDED_RADIUS_METERS / 1000).toFixed(0)} km.`;
+    }
+
+    state.matchLoadingPhaseTimer = window.setTimeout(() => {
+      if (state.matchLoadingRequestSerial !== requestSerial || matchLoadingOverlay.hidden) {
+        return;
+      }
+
+      if (matchLoadingText) {
+        matchLoadingText.textContent = `Still no strong match within ${(MATCH_EXPANDED_RADIUS_METERS / 1000).toFixed(0)} km. Expanding the search to ${(MATCH_MAX_RADIUS_METERS / 1000).toFixed(0)} km.`;
+      }
+      state.matchLoadingPhaseTimer = null;
+    }, 900);
+  }, 900);
+}
+
+function hideMatchLoadingOverlay(requestSerial = null, force = false) {
+  if (!matchLoadingOverlay) {
+    return;
+  }
+
+  if (state.matchLoadingPhaseTimer) {
+    window.clearTimeout(state.matchLoadingPhaseTimer);
+    state.matchLoadingPhaseTimer = null;
+  }
+
+  if (!force && requestSerial != null && requestSerial !== state.matchLoadingRequestSerial) {
+    return;
+  }
+
+  matchLoadingOverlay.hidden = true;
+  if (force || requestSerial === state.matchLoadingRequestSerial) {
+    state.matchLoadingRequestSerial = 0;
+  }
+}
+
 mapLegendControl.onAdd = () => {
   const container = L.DomUtil.create("div", "map-legend");
   L.DomEvent.disableClickPropagation(container);
@@ -362,6 +479,7 @@ function renderMapLegend(container) {
   }
 
   const counts = getMapLegendCounts();
+  const roadLegendMarkup = buildRoadLegendMarkup();
   const matchedLabel = state.ridePhase === "driver_to_pickup" || state.ridePhase === "on_trip"
     ? "Matched to you"
     : state.pendingDriverOffer
@@ -370,6 +488,7 @@ function renderMapLegend(container) {
 
   if (state.viewMode === "user") {
     container.innerHTML = `
+      ${roadLegendMarkup}
       <div class="map-legend__item">
         <span class="map-legend__dot map-legend__dot--matched"></span>
         <span>${matchedLabel}</span>
@@ -391,6 +510,7 @@ function renderMapLegend(container) {
   }
 
   container.innerHTML = `
+    ${roadLegendMarkup}
     <div class="map-legend__item">
       <span class="map-legend__dot map-legend__dot--hotspot"></span>
       <span>Hotspots (${counts.hotspots.toLocaleString()})</span>
@@ -424,6 +544,33 @@ function renderMapLegend(container) {
       <span>Drop-off</span>
     </div>
   `;
+}
+
+function buildRoadLegendMarkup() {
+  const roadTypes = getAvailableRoadTypes();
+  if (!roadTypes.length) {
+    return "";
+  }
+
+  return roadTypes.map((roadType) => `
+      <div class="map-legend__item">
+        <span class="map-legend__swatch" style="background:${getRoadTypeColor(roadType)}"></span>
+        <span>${describeRoadType(roadType)}</span>
+      </div>
+    `).join("");
+}
+
+function getAvailableRoadTypes() {
+  const types = new Set();
+  for (const segment of state.roadSegments) {
+    types.add(normalizeRoadType(segment.roadType));
+  }
+
+  const ordered = ROAD_TYPE_LEGEND_ORDER.filter((roadType) => types.has(roadType));
+  const extras = [...types]
+    .filter((roadType) => !ROAD_TYPE_LEGEND_ORDER.includes(roadType))
+    .sort((left, right) => left.localeCompare(right));
+  return [...ordered, ...extras];
 }
 
 function updateMapPrivacyLayers() {
@@ -585,6 +732,38 @@ function updateOfferCard(title, detail) {
   updateRequestUI();
 }
 
+function renderSmartPickupRecommendation(recommendation) {
+  state.smartPickupRecommendation = recommendation || null;
+  if (!pickupSuggestionCard) {
+    return;
+  }
+
+  if (!recommendation?.suggested || !recommendation.recommended) {
+    pickupSuggestionCard.hidden = true;
+    return;
+  }
+
+  pickupSuggestionCard.hidden = false;
+  pickupSuggestionTitle.textContent = "Suggested pickup point available";
+  pickupSuggestionDetail.textContent = recommendation.reason || "A nearby pickup point may improve driver access.";
+  pickupSuggestionWalk.textContent = `${Math.round(recommendation.walkingDistanceMeters || 0)} m`;
+  pickupSuggestionEta.textContent = recommendation.etaImprovementMinutes >= 1
+    ? `${recommendation.etaImprovementMinutes} min faster`
+    : "Better road access";
+  pickupSuggestionRoad.textContent = recommendation.recommended.roadTypeLabel || describeRoadType(recommendation.recommended.roadType);
+  pickupSuggestionReason.textContent = recommendation.reason || "Improves pickup suitability.";
+}
+
+function dismissSmartPickupRecommendation(usedSuggestedPickup) {
+  state.smartPickupRecommendation = null;
+  if (pickupSuggestionCard) {
+    pickupSuggestionCard.hidden = true;
+  }
+  if (!usedSuggestedPickup && state.selectedDriverId) {
+    setStatus("Keeping the original pickup point. Your driver stays on the current route.");
+  }
+}
+
 function clearOfferMatchSummary() {
   if (offerScoreText) offerScoreText.textContent = "--";
   if (offerEtaText) offerEtaText.textContent = "--";
@@ -652,6 +831,16 @@ function renderMatcherSourceBadges(offer) {
     badges.push(createMatcherSourceBadge(trafficLabel, trafficClass));
   }
 
+  if (offer.weatherSource) {
+    const weatherLabel = offer.weatherSource === "open_meteo_live"
+      ? "Weather: Open-Meteo live"
+      : "Weather: Fallback";
+    const weatherClass = offer.weatherSource === "open_meteo_live"
+      ? "matcher-source-badge matcher-source-badge--live"
+      : "matcher-source-badge matcher-source-badge--fallback";
+    badges.push(createMatcherSourceBadge(weatherLabel, weatherClass));
+  }
+
   matcherSourceRow.replaceChildren(...badges);
 }
 
@@ -688,6 +877,16 @@ function buildOfferReasonItems(offer) {
     items.push(offer.trafficNotice.endsWith(".") ? offer.trafficNotice : `${offer.trafficNotice}.`);
   } else if (offer.trafficSource) {
     items.push(`Traffic source: ${describeTrafficSource(offer.trafficSource)}.`);
+  }
+
+  if (typeof offer.weatherMultiplier === "number") {
+    items.push(`Weather: ${formatWeatherScoreLabel(offer.weatherMultiplier)}.`);
+  }
+
+  if (offer.weatherNotice) {
+    items.push(offer.weatherNotice.endsWith(".") ? offer.weatherNotice : `${offer.weatherNotice}.`);
+  } else if (offer.weatherSource) {
+    items.push(`Weather source: ${describeWeatherSource(offer.weatherSource)}.`);
   }
 
   if (typeof offer.pickupDistanceMeters === "number") {
@@ -890,13 +1089,17 @@ function normalizeUiCopy() {
 async function initialize() {
   startClock();
   setWeatherText("Loading weather...");
-  requestBrowserLocation();
 
   if (shouldUsePythonBackend()) {
     try {
     setStatus("Loading data from the backend...");
     const bootstrap = await fetchBootstrap();
     applyBootstrapPayload(bootstrap);
+    if (!hasRoadTypeMetadata(state.roadSegments) && Array.isArray(bootstrap?.boundary?.boundingbox)) {
+      setStatus("Refreshing road classes from OpenStreetMap...");
+      const overpassData = await fetchRoadNetwork(bootstrap.boundary.boundingbox);
+      buildGraph(overpassData);
+    }
     drawRoadNetwork();
     drawLandmarks();
     initializeDrivers();
@@ -907,7 +1110,7 @@ async function initialize() {
     hideLoadingOverlay();
     return;
     } catch (error) {
-      console.warn("Python backend bootstrap unavailable, falling back to browser-side loading.", error);
+      console.warn("Python backend initialization failed, falling back to browser-side loading.", error);
       state.usingPythonBackend = false;
     }
   }
@@ -973,6 +1176,13 @@ function applyBootstrapPayload(payload) {
   state.backendSupportsTrafficProxy = Object.prototype.hasOwnProperty.call(payload || {}, "liveTrafficEnabled");
 }
 
+function hasRoadTypeMetadata(roads) {
+  return Array.isArray(roads) && roads.some((road) => {
+    const type = normalizeRoadType(road.roadType);
+    return type && type !== "unclassified";
+  });
+}
+
 async function fetchBoundary() {
   const params = new URLSearchParams({
     q: "Olongapo City, Philippines",
@@ -1030,21 +1240,31 @@ function applyBoundary(boundary) {
 }
 
 function requestBrowserLocation() {
-  if (!("geolocation" in navigator)) {
+  if (!("geolocation" in navigator) || state.browserLocationRequestInFlight) {
     return;
   }
 
+  state.browserLocationRequestInFlight = true;
   navigator.geolocation.getCurrentPosition(
     (position) => {
-      state.browserLocation = {
+      state.browserLocationRequestInFlight = false;
+      const detectedLocation = normalizeLocationPoint({
         lat: position.coords.latitude,
         lng: position.coords.longitude,
         accuracy: position.coords.accuracy ?? null
-      };
+      });
+      if (!detectedLocation) {
+        console.warn("Browser geolocation returned invalid coordinates.", position);
+        clearBrowserLocationMarker();
+        return;
+      }
+      state.browserLocation = detectedLocation;
+      state.browserLocationCentered = false;
       updateBrowserLocationMarker();
       maybeCenterMapOnBrowserLocation();
     },
     (error) => {
+      state.browserLocationRequestInFlight = false;
       console.warn("Browser geolocation unavailable.", error);
     },
     {
@@ -1078,6 +1298,12 @@ function maybeCenterMapOnBrowserLocation() {
     return;
   }
 
+  if (!isValidLocationPoint(state.browserLocation)) {
+    clearBrowserLocationMarker();
+    state.browserLocation = null;
+    return;
+  }
+
   if (!isLocationInsideOrNearOlongapo(state.browserLocation)) {
     return;
   }
@@ -1090,6 +1316,12 @@ function centerUserModeOnBrowserLocation() {
     return false;
   }
 
+  if (!isValidLocationPoint(state.browserLocation)) {
+    clearBrowserLocationMarker();
+    state.browserLocation = null;
+    return false;
+  }
+
   if (!isLocationInsideOrNearOlongapo(state.browserLocation)) {
     return false;
   }
@@ -1098,26 +1330,30 @@ function centerUserModeOnBrowserLocation() {
 }
 
 function zoomToBrowserLocation(animate = true, forcedZoom = null, requireBounds = false) {
-  if (!state.browserLocation) {
+  const normalizedLocation = normalizeLocationPoint(state.browserLocation);
+  if (!normalizedLocation) {
+    clearBrowserLocationMarker();
+    state.browserLocation = null;
     return false;
   }
 
-  const browserLatLng = L.latLng(state.browserLocation.lat, state.browserLocation.lng);
+  state.browserLocation = normalizedLocation;
+  const browserLatLng = L.latLng(normalizedLocation.lat, normalizedLocation.lng);
   if (requireBounds && (!state.bounds || !state.bounds.contains(browserLatLng))) {
     return false;
   }
 
-  const targetZoom = forcedZoom ?? (state.viewMode === "user" ? 17 : Math.max(map.getZoom(), 15));
-  if (animate) {
-    map.flyTo(browserLatLng, targetZoom, {
-      animate: true,
-      duration: 0.8
-    });
-  } else {
-    map.setView(browserLatLng, targetZoom, {
-      animate: false
-    });
+  const currentZoom = Number(map.getZoom());
+  const targetZoom = Number.isFinite(Number(forcedZoom))
+    ? Number(forcedZoom)
+    : (state.viewMode === "user" ? 17 : (Number.isFinite(currentZoom) ? Math.max(currentZoom, 15) : 15));
+
+  if (typeof map.stop === "function") {
+    map.stop();
   }
+  map.setView(browserLatLng, targetZoom, {
+    animate: false
+  });
   state.browserLocationCentered = true;
   return true;
 }
@@ -1135,8 +1371,9 @@ function focusMapOnBrowserLocation({ animate = true, zoom = null, requireBounds 
 }
 
 function updateBrowserLocationMarker() {
-  if (!state.browserLocation) {
+  if (!state.browserLocation || !isValidLocationPoint(state.browserLocation)) {
     clearBrowserLocationMarker();
+    state.browserLocation = null;
     return;
   }
 
@@ -1180,10 +1417,15 @@ function isBrowserLocationInsideOlongapo() {
 
 function handleManualLocationFound(event) {
   const detectedLocation = {
-    lat: event.latlng.lat,
-    lng: event.latlng.lng,
+    lat: Number(event.latlng?.lat),
+    lng: Number(event.latlng?.lng),
     accuracy: event.accuracy ?? null
   };
+  if (!isValidLocationPoint(detectedLocation)) {
+    clearBrowserLocationMarker();
+    setStatus("Location was detected, but the coordinates were invalid.");
+    return;
+  }
   state.browserLocation = detectedLocation;
   state.browserLocationCentered = false;
 
@@ -1362,6 +1604,8 @@ function buildGraph(overpassData) {
   for (const way of ways) {
     const tags = way.tags || {};
     const isOneWay = tags.oneway === "yes" || tags.oneway === "1" || tags.junction === "roundabout";
+    const roadType = normalizeRoadType(tags.highway);
+    const roadTypeLabel = describeRoadType(roadType);
 
     for (let index = 0; index < way.nodes.length - 1; index += 1) {
       const fromNode = rawNodes.get(way.nodes[index]);
@@ -1381,7 +1625,9 @@ function buildGraph(overpassData) {
       state.roadSegments.push({
         fromNodeId: fromNode.id,
         toNodeId: toNode.id,
-        distance
+        distance,
+        roadType,
+        roadTypeLabel
       });
       addEdge(fromNode, toNode, distance);
 
@@ -1417,9 +1663,30 @@ function buildGraphFromPayload(nodes, graph, roads) {
     state.roadSegments.push({
       fromNodeId: String(road.fromNodeId),
       toNodeId: String(road.toNodeId),
-      distance: Number(road.distance)
+      distance: Number(road.distance),
+      roadType: normalizeRoadType(road.roadType),
+      roadTypeLabel: road.roadTypeLabel || describeRoadType(road.roadType)
     });
   }
+}
+
+function isValidLocationPoint(point) {
+  return Boolean(normalizeLocationPoint(point));
+}
+
+function normalizeLocationPoint(point) {
+  const lat = Number(point?.lat);
+  const lng = Number(point?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return null;
+  }
+
+  const accuracyValue = Number(point?.accuracy);
+  return {
+    lat,
+    lng,
+    accuracy: Number.isFinite(accuracyValue) ? accuracyValue : null
+  };
 }
 
 function buildLandmarks(overpassData) {
@@ -1542,45 +1809,45 @@ function addEdge(fromNode, toNode, distance) {
 function drawRoadNetwork() {
   networkLayer.clearLayers();
 
-  const drawnPairs = new Set();
-  for (const [nodeId, neighbors] of state.graph.entries()) {
-    const fromNode = state.nodeIndex.get(nodeId);
-    for (const neighbor of neighbors) {
-      const pairKey = [nodeId, neighbor.id].sort((a, b) => a - b).join(":");
-      if (drawnPairs.has(pairKey)) {
-        continue;
-      }
-
-      drawnPairs.add(pairKey);
-      const toNode = state.nodeIndex.get(neighbor.id);
-      const latLngs = [
-        [fromNode.lat, fromNode.lng],
-        [toNode.lat, toNode.lng]
-      ];
-      const segmentMeta = {
-        fromNodeId: fromNode.id,
-        toNodeId: toNode.id,
-        distance: haversineDistance(fromNode, toNode)
-      };
-      const handleSegmentClick = (event) => handleUserRoadSelection(event.latlng, segmentMeta);
-
-      L.polyline(latLngs, {
-        color: "#267a5c",
-        weight: 2,
-        opacity: 0.28,
-        interactive: false
-      }).addTo(networkLayer);
-
-      L.polyline(latLngs, {
-        color: "#267a5c",
-        weight: 14,
-        opacity: 0.01,
-        interactive: true,
-        bubblingMouseEvents: false
-      })
-        .on("click", handleSegmentClick)
-        .addTo(networkLayer);
+  for (const segment of state.roadSegments) {
+    const fromNode = state.nodeIndex.get(segment.fromNodeId);
+    const toNode = state.nodeIndex.get(segment.toNodeId);
+    if (!fromNode || !toNode) {
+      continue;
     }
+
+    const latLngs = [
+      [fromNode.lat, fromNode.lng],
+      [toNode.lat, toNode.lng]
+    ];
+    const segmentMeta = {
+      fromNodeId: fromNode.id,
+      toNodeId: toNode.id,
+      distance: Number(segment.distance),
+      roadType: normalizeRoadType(segment.roadType),
+      roadTypeLabel: segment.roadTypeLabel || describeRoadType(segment.roadType)
+    };
+    const roadColor = getRoadTypeColor(segmentMeta.roadType);
+    const roadWeight = getRoadTypeStrokeWeight(segmentMeta.roadType);
+    const handleSegmentClick = (event) => handleUserRoadSelection(event.latlng, segmentMeta);
+
+    L.polyline(latLngs, {
+      color: roadColor,
+      weight: roadWeight,
+      opacity: 0.62,
+      interactive: false
+    }).addTo(networkLayer);
+
+    L.polyline(latLngs, {
+      color: roadColor,
+      weight: Math.max(roadWeight + 10, 14),
+      opacity: 0.01,
+      interactive: true,
+      bubblingMouseEvents: false
+    })
+      .bindPopup(`<span class="point-popup">Road type: ${segmentMeta.roadTypeLabel}</span>`)
+      .on("click", handleSegmentClick)
+      .addTo(networkLayer);
   }
 }
 
@@ -1611,7 +1878,9 @@ function handleUserRoadSelection(latlng, preferredSegment = null) {
         snappedRoadPoint = {
           ...projectedPoint,
           fromNodeId: fromNode.id,
-          toNodeId: toNode.id
+          toNodeId: toNode.id,
+          roadType: normalizeRoadType(preferredSegment.roadType),
+          roadTypeLabel: preferredSegment.roadTypeLabel || describeRoadType(preferredSegment.roadType)
         };
       }
     }
@@ -1630,8 +1899,8 @@ function handleUserRoadSelection(latlng, preferredSegment = null) {
     setPickupLocation(snappedRoadPoint);
     state.selectionMode = "dropoff";
     setStatus(preferredSegment
-      ? "Pickup snapped to the selected road segment. Now choose your drop-off."
-      : "Pickup snapped to the nearest road segment. Now choose your drop-off.");
+      ? `Pickup snapped to the selected ${describeRoadType(snappedRoadPoint.roadType)}. Now choose your drop-off.`
+      : `Pickup snapped to the nearest ${describeRoadType(snappedRoadPoint.roadType)}. Now choose your drop-off.`);
     updateOfferCard("Choose your drop-off next", "Your pickup point is saved. Set the destination to review a driver suggestion.");
     updateRequestUI();
     return;
@@ -1640,8 +1909,8 @@ function handleUserRoadSelection(latlng, preferredSegment = null) {
   setDropoffLocation(snappedRoadPoint);
   state.selectionMode = null;
   setStatus(preferredSegment
-    ? "Drop-off snapped to the selected road segment. Reviewing a suggested driver..."
-    : "Drop-off snapped to the nearest road segment. Reviewing a suggested driver...");
+    ? `Drop-off snapped to the selected ${describeRoadType(snappedRoadPoint.roadType)}. Reviewing a suggested driver...`
+    : `Drop-off snapped to the nearest ${describeRoadType(snappedRoadPoint.roadType)}. Reviewing a suggested driver...`);
   state.rejectedDriverIds.clear();
   clearDriverSuggestionRanking();
   void prepareDriverSuggestion();
@@ -1651,6 +1920,7 @@ function setPickupLocation(point) {
   state.matchingRequestSerial += 1;
   state.isRankingDrivers = false;
   state.userPanelTab = "request";
+  dismissSmartPickupRecommendation(false);
   clearDriverSuggestionRanking();
   const pickupNode = addTemporaryPointToGraph(point, USER_POINT_NODE_ID);
   const marker = L.circleMarker([pickupNode.lat, pickupNode.lng], {
@@ -1679,6 +1949,7 @@ function setDropoffLocation(point) {
   state.matchingRequestSerial += 1;
   state.isRankingDrivers = false;
   state.userPanelTab = "request";
+  dismissSmartPickupRecommendation(false);
   clearDriverSuggestionRanking();
   const dropoffNode = addTemporaryPointToGraph(point, DROPOFF_POINT_NODE_ID);
   const marker = L.circleMarker([dropoffNode.lat, dropoffNode.lng], {
@@ -1707,6 +1978,7 @@ function resetSelections() {
   state.matchingRequestSerial += 1;
   state.isRankingDrivers = false;
   state.userPanelTab = "request";
+  dismissSmartPickupRecommendation(false);
   clearPendingDriverOffer();
   clearDriverSuggestionRanking();
   releaseSelectedDriver();
@@ -1789,12 +2061,17 @@ async function prepareDriverSuggestion() {
     state.userPanelTab = "driver";
     updateRequestUI();
     bestDriverText.textContent = "Ranking nearby drivers";
-    driverTrafficText.textContent = "Checking route distance, traffic, reliability, and route efficiency";
+    driverTrafficText.textContent = "Checking route distance, traffic, weather, reliability, and route efficiency";
     routeText.textContent = `Trip preview: ${(tripPath.distance / 1000).toFixed(2)} km after pickup`;
     routeTrafficText.textContent = "Route traffic: preview only until you accept a driver";
     updateOfferCard(
       "Finding the best driver",
-      `Ranking nearby ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} drivers using route distance, traffic, route efficiency, rating, cancellation risk, and movement behavior. ETA is shown for understanding but not scored directly.`
+      `Ranking nearby ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} drivers using route distance, traffic, weather, route efficiency, rating, cancellation risk, and movement behavior. ETA is shown for understanding but not scored directly.`
+    );
+    showMatchLoadingOverlay(
+      requestSerial,
+      "Finding the best driver",
+      `Searching for nearby ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} drivers within ${(MATCH_DEFAULT_RADIUS_METERS / 1000).toFixed(0)} km first.`
     );
 
     const ranking = state.usingPythonBackend
@@ -1826,9 +2103,11 @@ async function prepareDriverSuggestion() {
       updateOfferCard(ranking.offerTitle, ranking.offerDetail);
       updateRequestUI();
       setStatus(ranking.statusMessage);
+      hideMatchLoadingOverlay(requestSerial);
       return;
     }
 
+    hideMatchLoadingOverlay(requestSerial);
     presentRankedDriverSuggestion();
   } catch (error) {
     console.error(error);
@@ -1842,6 +2121,7 @@ async function prepareDriverSuggestion() {
     updateRequestUI();
     setStatus("The intelligent matcher could not finish this request.");
   } finally {
+    hideMatchLoadingOverlay(requestSerial);
     state.isRankingDrivers = false;
   }
 }
@@ -1913,6 +2193,42 @@ function serializeDriverForMatching(driver) {
     lockedToUser: driver.lockedToUser,
     heldForOffer: driver.heldForOffer
   };
+}
+
+async function fetchSmartPickupRecommendation(offer) {
+  if (!state.usingPythonBackend || !offer?.driver || !state.userPoint || !state.dropoffPoint) {
+    return null;
+  }
+
+  try {
+    const response = await fetch("/api/smart-pickup-recommendation", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        pickup: {
+          lat: state.userPoint.lat,
+          lng: state.userPoint.lng
+        },
+        dropoff: {
+          lat: state.dropoffPoint.lat,
+          lng: state.dropoffPoint.lng
+        },
+        driver: serializeDriverForMatching(offer.driver)
+      })
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    return await response.json();
+  } catch (error) {
+    console.warn("Smart pickup recommendation unavailable.", error);
+    return null;
+  }
 }
 
 function releaseSelectedDriver() {
@@ -1988,11 +2304,10 @@ function releaseDriverOfferHold(driver) {
 }
 
 async function buildDriverSuggestionRanking(tripPath) {
-  const serviceRadii = [MATCH_DEFAULT_RADIUS_METERS, MATCH_EXPANDED_RADIUS_METERS];
   let eligibleDrivers = [];
   let radiusMeters = MATCH_DEFAULT_RADIUS_METERS;
 
-  for (const radius of serviceRadii) {
+  for (const radius of MATCH_SERVICE_RADII_METERS) {
     eligibleDrivers = state.drivers.filter((driver) => isDriverEligibleForSuggestion(driver, radius));
     radiusMeters = radius;
     if (eligibleDrivers.length) {
@@ -2011,10 +2326,10 @@ async function buildDriverSuggestionRanking(tripPath) {
       trafficNotice: "Traffic source: heuristic fallback because live traffic was unavailable.",
       weatherNotice: state.weatherContext?.notice || "Weather source: fallback because live weather was unavailable.",
       reasonTitle: "No nearby eligible driver",
-      reasonDetail: `No ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} driver passed the quality checks within 5.0 km.`,
+      reasonDetail: `No ${state.selectedVehicleType === "car" ? "car" : "motorcycle"} driver passed the quality checks within ${(radiusMeters / 1000).toFixed(1)} km.`,
       offerTitle: "No driver found within service range",
-      offerDetail: "We checked 3 km first, then expanded to 5 km, but no nearby driver met the vehicle, route, radius, and availability requirements.",
-      statusMessage: "No eligible driver met the matching rules within 5 km."
+      offerDetail: "We checked 3 km first, then expanded to 5 km and 10 km, but no nearby driver met the vehicle, route, radius, and availability requirements.",
+      statusMessage: `No eligible driver met the matching rules within ${(radiusMeters / 1000).toFixed(0)} km.`
     };
   }
 
@@ -2130,6 +2445,7 @@ async function evaluateDriverCandidate(driver, tripPath) {
   const speedKph = driver.speedKph || DRIVER_SPEED_KPH;
   const pickupEtaMinutes = getEtaMinutes(pickupDistanceMeters, speedKph, trafficRatio, weatherMultiplier);
   const tripEtaMinutes = getEtaMinutes(tripPath.distance, speedKph, trafficRatio, weatherMultiplier);
+  const weatherScore = clampValue(1 / Math.max(weatherMultiplier, 1), 0, 1);
   const trafficScore = clampValue(trafficRatio, 0, 1);
 
   return {
@@ -2148,6 +2464,7 @@ async function evaluateDriverCandidate(driver, tripPath) {
     weatherSource,
     weatherNotice: state.weatherContext?.notice || "Weather source: fallback because live weather was unavailable.",
     trafficScore,
+    weatherScore,
     ratingScore: clampValue((driver.rating - 4) / 1, 0, 1),
     cancellationScore: clampValue(1 - (driver.cancellationRate / 0.25), 0, 1),
     routeEfficiencyScore: clampValue(directDistanceMeters / Math.max(pickupDistanceMeters, 1), 0, 1),
@@ -2204,22 +2521,6 @@ function getEtaMinutes(distanceMeters, speedKph, trafficRatio, weatherMultiplier
   return Math.max(1, Math.round((distanceMeters / 1000 / adjustedSpeedKph) * 60));
 }
 
-function getEffectiveDriverSpeedKph(driver, remainingDistanceMeters = 0) {
-  const baseSpeedKph = driver.speedKph || DRIVER_SPEED_KPH;
-  const weatherMultiplier = state.weatherContext?.multiplier || driver.movementWeatherMultiplier || 1;
-  const trafficRatio = typeof driver.movementTrafficRatio === "number"
-    ? driver.movementTrafficRatio
-    : estimateHeuristicTrafficRatio(remainingDistanceMeters || 0, weatherMultiplier);
-
-  return Math.max(8, baseSpeedKph * Math.max(trafficRatio, 0.2)) / Math.max(weatherMultiplier, 0.8);
-}
-
-function getDriverMoveDistanceMeters(driver, deltaSeconds) {
-  const remainingDistance = getDriverRemainingDistance(driver);
-  const effectiveSpeedKph = getEffectiveDriverSpeedKph(driver, remainingDistance);
-  return (effectiveSpeedKph * 1000 / 3600) * deltaSeconds;
-}
-
 function getDriverMovementScore(driver) {
   if (driver.status === "standby_available") {
     return 0.82;
@@ -2244,8 +2545,9 @@ function applyRelativeScoresToCandidates(candidates) {
   for (const candidate of candidates) {
     candidate.distanceScore = getInverseRelativeScore(candidate.pickupDistanceMeters, distanceMin, distanceMax);
     candidate.finalScore = (
-      (candidate.distanceScore * 0.35)
-      + (candidate.trafficScore * 0.25)
+      (candidate.distanceScore * 0.3)
+      + (candidate.trafficScore * 0.2)
+      + (candidate.weatherScore * 0.1)
       + (candidate.ratingScore * 0.1)
       + (candidate.cancellationScore * 0.1)
       + (candidate.routeEfficiencyScore * 0.15)
@@ -2254,6 +2556,7 @@ function applyRelativeScoresToCandidates(candidates) {
     candidate.scoreBreakdown = {
       distance_score: candidate.distanceScore,
       traffic_score: candidate.trafficScore,
+      weather_score: candidate.weatherScore,
       rating_score: candidate.ratingScore,
       cancellation_score: candidate.cancellationScore,
       route_efficiency_score: candidate.routeEfficiencyScore,
@@ -2267,6 +2570,7 @@ function applyRelativeScoresToCandidates(candidates) {
       weather_source: candidate.weatherSource,
       distance_score: candidate.distanceScore,
       traffic_score: candidate.trafficScore,
+      weather_score: candidate.weatherScore,
       rating_score: candidate.ratingScore,
       cancellation_score: candidate.cancellationScore,
       route_efficiency_score: candidate.routeEfficiencyScore,
@@ -2295,6 +2599,8 @@ function buildDriverSelectionReason(candidate, baselineCandidate) {
 
   reasonParts.push(`${describeTrafficRatio(candidate.trafficRatio)} traffic`);
   reasonParts.push(candidate.trafficSource === "tomtom_live" ? "used TomTom live traffic" : "used heuristic traffic fallback");
+  reasonParts.push(`${formatWeatherScoreLabel(candidate.weatherMultiplier)} weather impact`);
+  reasonParts.push(candidate.weatherSource === "open_meteo_live" ? "used Open-Meteo live weather" : "used weather fallback");
   reasonParts.push(`${(candidate.pickupDistanceMeters / 1000).toFixed(2)} km routed pickup distance`);
   reasonParts.push(`${Math.round(candidate.routeEfficiencyScore * 100)}% route efficiency`);
   reasonParts.push(`${candidate.driver.rating.toFixed(2)} rating`);
@@ -2513,6 +2819,9 @@ function updateSuggestedDriverInfo(offer) {
   if (offer.trafficSource === "heuristic_fallback") {
     environmentFlags.push("traffic fallback active");
   }
+  if (offer.weatherSource === "weather_fallback") {
+    environmentFlags.push("weather fallback active");
+  }
   const environmentSuffix = environmentFlags.length
     ? ` ${environmentFlags.join(", ")}.`
     : "";
@@ -2529,7 +2838,7 @@ function updateSuggestedDriverInfo(offer) {
   updateRequestUI();
 }
 
-function assignMatchedDriverToUser(driver, startNode, path, offer) {
+function assignMatchedDriverToUser(driver, startNode, path) {
   driver.status = "assigned_pickup";
   driver.currentNodeId = startNode.id;
   driver.routeNodeIds = path.nodeIds;
@@ -2540,12 +2849,67 @@ function assignMatchedDriverToUser(driver, startNode, path, offer) {
   driver.lockedToUser = true;
   driver.lat = startNode.lat;
   driver.lng = startNode.lng;
-  driver.movementTrafficRatio = typeof offer?.trafficRatio === "number"
-    ? offer.trafficRatio
-    : estimateHeuristicTrafficRatio(path.distance || 0, offer?.weatherMultiplier || state.weatherContext?.multiplier || 1);
-  driver.movementTrafficSource = offer?.trafficSource || "heuristic_fallback";
-  driver.movementWeatherMultiplier = offer?.weatherMultiplier || state.weatherContext?.multiplier || 1;
-  driver.movementWeatherSource = offer?.weatherSource || state.weatherContext?.source || "weather_fallback";
+}
+
+function updatePickupMarkerForPoint(point) {
+  const marker = L.circleMarker([point.lat, point.lng], {
+    radius: 8,
+    color: "#ffffff",
+    weight: 2,
+    fillColor: "#0b6e4f",
+    fillOpacity: 1
+  }).bindPopup('<span class="point-popup">Pickup</span>');
+
+  if (state.userMarker) {
+    markerLayer.removeLayer(state.userMarker);
+  }
+
+  state.userMarker = marker.addTo(markerLayer);
+  state.userPoint = point;
+  userLocationText.textContent = formatLatLng(point);
+}
+
+function updateAcceptedPickupRoute(offer, pickupPoint, pickupPath, tripPath, startNode) {
+  if (!offer?.driver || !pickupPoint || !pickupPath || !tripPath || !startNode) {
+    return false;
+  }
+
+  removeTemporaryPointFromGraph(USER_POINT_NODE_ID);
+  updatePickupMarkerForPoint(pickupPoint);
+
+  offer.startNode = startNode;
+  offer.pickupPath = pickupPath;
+  offer.tripPath = tripPath;
+  offer.pickupDistanceMeters = pickupPath.distance + haversineDistance(offer.driver, startNode);
+  offer.pickupEtaMinutes = getEtaMinutes(
+    offer.pickupDistanceMeters,
+    offer.driver.speedKph || DRIVER_SPEED_KPH,
+    offer.trafficRatio || MATCH_TRAFFIC_FALLBACK_RATIO,
+    offer.weatherMultiplier || 1
+  );
+  offer.tripEtaMinutes = getEtaMinutes(
+    tripPath.distance,
+    offer.driver.speedKph || DRIVER_SPEED_KPH,
+    offer.trafficRatio || MATCH_TRAFFIC_FALLBACK_RATIO,
+    offer.weatherMultiplier || 1
+  );
+
+  assignMatchedDriverToUser(offer.driver, startNode, pickupPath);
+  routeLayer.clearLayers();
+  L.polyline(buildRouteLine([offer.driver.lat, offer.driver.lng], startNode, pickupPath), {
+    color: "#f4a261",
+    weight: 6,
+    opacity: 0.92
+  }).addTo(routeLayer);
+  driverTrafficText.textContent = "Driver route updated to the suggested pickup point";
+  routeText.textContent = `Driver to pickup: ${(pickupPath.distance / 1000).toFixed(2)} km`;
+  routeTrafficText.textContent = "Route traffic: pickup leg is now active";
+  loadTrafficForPoint("user", pickupPoint);
+  loadTrafficForPoint("driver", getDriverRouteStartNode(offer.driver));
+  loadRouteTrafficSummary(pickupPath.nodeIds);
+  updateMapLegend();
+  updateRequestUI();
+  return true;
 }
 
 function acceptPendingDriverOffer() {
@@ -2563,7 +2927,7 @@ function acceptPendingDriverOffer() {
   state.selectedDriverId = offer.driver.id;
   state.ridePhase = "driver_to_pickup";
   state.userPanelTab = "trip";
-  assignMatchedDriverToUser(offer.driver, offer.startNode, offer.pickupPath, offer);
+  assignMatchedDriverToUser(offer.driver, offer.startNode, offer.pickupPath);
   routeLayer.clearLayers();
   L.polyline(buildRouteLine([offer.driver.lat, offer.driver.lng], offer.startNode, offer.pickupPath), {
     color: "#f4a261",
@@ -2576,7 +2940,10 @@ function acceptPendingDriverOffer() {
   routeTrafficText.textContent = "Route traffic: pickup leg is now active";
   updateOfferCard("Driver accepted", "Your driver is now heading to the pickup point. You will switch to the drop-off trip after pickup.");
   loadTrafficForPoint("driver", getDriverRouteStartNode(offer.driver));
-  loadRouteTrafficSummary(offer.pickupPath.nodeIds, offer.driver, offer.pickupPath.distance);
+  loadRouteTrafficSummary(offer.pickupPath.nodeIds);
+  void fetchSmartPickupRecommendation(offer).then((recommendation) => {
+    renderSmartPickupRecommendation(recommendation);
+  });
 
   for (const candidate of state.drivers) {
     updateDriverMarker(candidate);
@@ -2585,6 +2952,36 @@ function acceptPendingDriverOffer() {
   updateMapLegend();
   updateRequestUI();
   setStatus(`Driver ${offer.driver.id} accepted. They are now heading to your pickup point.`);
+}
+
+function applySuggestedPickupRecommendation() {
+  const recommendation = state.smartPickupRecommendation;
+  const offer = state.pendingDriverOffer;
+  if (!recommendation?.suggested || !recommendation.recommended || !offer?.driver || state.ridePhase !== "driver_to_pickup") {
+    return;
+  }
+
+  const suggestedNode = state.nodeIndex.get(String(recommendation.recommended.candidateId));
+  if (!suggestedNode || !state.dropoffPoint) {
+    setStatus("Suggested pickup point could not be applied right now.");
+    return;
+  }
+
+  const actualStartNode = getDriverRouteStartNode(offer.driver);
+  const pickupPath = actualStartNode ? getPathBetweenNodes(actualStartNode.id, suggestedNode.id) : null;
+  const tripPath = getPathBetweenNodes(suggestedNode.id, state.dropoffPoint.id);
+  if (!actualStartNode || !pickupPath || !tripPath) {
+    setStatus("Suggested pickup point could not be routed right now.");
+    return;
+  }
+
+  if (!updateAcceptedPickupRoute(offer, suggestedNode, pickupPath, tripPath, actualStartNode)) {
+    setStatus("Suggested pickup point could not be applied right now.");
+    return;
+  }
+
+  dismissSmartPickupRecommendation(true);
+  setStatus(`Suggested pickup applied. Walk about ${Math.round(recommendation.walkingDistanceMeters || 0)} m to the ${recommendation.recommended.roadTypeLabel}.`);
 }
 
 function suggestOtherDriverLegacy() {
@@ -2637,8 +3034,7 @@ function syncMatchedDriverRoute() {
   }).addTo(routeLayer);
 
   const remainingDistance = getDriverRemainingDistance(driver);
-  const effectiveSpeedKph = getEffectiveDriverSpeedKph(driver, remainingDistance);
-  const etaMinutes = Math.max(1, Math.round((remainingDistance / 1000 / effectiveSpeedKph) * 60));
+  const etaMinutes = Math.max(1, Math.round((remainingDistance / 1000 / DRIVER_SPEED_KPH) * 60));
   routeText.textContent = `${activeLabel}: ${(remainingDistance / 1000).toFixed(2)} km, approx ${etaMinutes} min`;
 }
 
@@ -2754,12 +3150,61 @@ function getNearestRoadPoint(lat, lng) {
       bestSnap = {
         ...candidate,
         fromNodeId: fromNode.id,
-        toNodeId: toNode.id
+        toNodeId: toNode.id,
+        roadType: normalizeRoadType(segment.roadType),
+        roadTypeLabel: segment.roadTypeLabel || describeRoadType(segment.roadType)
       };
     }
   }
 
   return bestSnap;
+}
+
+function normalizeRoadType(roadType) {
+  if (Array.isArray(roadType)) {
+    roadType = roadType[0] || "unclassified";
+  }
+  return String(roadType || "unclassified").trim().toLowerCase() || "unclassified";
+}
+
+function describeRoadType(roadType) {
+  const normalized = normalizeRoadType(roadType);
+  const labels = {
+    motorway: "motorway",
+    motorway_link: "motorway link",
+    trunk: "trunk road",
+    trunk_link: "trunk link",
+    primary: "primary road",
+    primary_link: "primary link",
+    secondary: "secondary road",
+    secondary_link: "secondary link",
+    tertiary: "tertiary road",
+    tertiary_link: "tertiary link",
+    residential: "residential road",
+    living_street: "living street",
+    unclassified: "unclassified road",
+    service: "service road",
+    road: "local road"
+  };
+  return labels[normalized] || normalized.replaceAll("_", " ");
+}
+
+function getRoadTypeColor(roadType) {
+  return ROAD_TYPE_COLORS[normalizeRoadType(roadType)] || "#5c8d89";
+}
+
+function getRoadTypeStrokeWeight(roadType) {
+  const normalized = normalizeRoadType(roadType);
+  if (["motorway", "trunk", "primary"].includes(normalized)) {
+    return 4;
+  }
+  if (["secondary", "tertiary"].includes(normalized)) {
+    return 3;
+  }
+  if (normalized === "service") {
+    return 2;
+  }
+  return 2.5;
 }
 
 function projectPointOntoSegment(point, fromNode, toNode, segmentDistance = haversineDistance(fromNode, toNode)) {
@@ -2998,12 +3443,6 @@ function initializeDrivers() {
     const marker = L.circleMarker(INITIAL_CENTER, getDriverMarkerStyle("inactive", driverTypes[index]))
       .bindPopup("")
       .addTo(driverLayer);
-    marker.on("popupopen", () => {
-      const driver = state.drivers.find((candidate) => candidate.marker === marker);
-      if (driver && state.viewMode === "admin") {
-        refreshDriverTrafficContext(driver, { force: true });
-      }
-    });
 
     state.drivers.push({
       id: index + 1,
@@ -3017,13 +3456,6 @@ function initializeDrivers() {
       routeNodeIds: [],
       routeSegmentIndex: 0,
       routeSegmentProgress: 0,
-      movementTrafficRatio: null,
-      movementTrafficSource: "",
-      movementWeatherMultiplier: null,
-      movementWeatherSource: "",
-      movementTrafficSegmentKey: "",
-      movementTrafficRefreshPending: false,
-      lastMovementTrafficRefreshAt: 0,
       targetLandmarkId: null,
       targetUserNodeId: null,
       heldForOffer: false,
@@ -3035,15 +3467,13 @@ function initializeDrivers() {
   }
 
   reconcileDriverTargets(true);
+  ensureDriverSimulationHasActiveFleet();
   updateDriverSummary();
 }
 
 function startDriverSimulation() {
   if (state.driverAnimationHandle) {
     cancelAnimationFrame(state.driverAnimationHandle);
-  }
-  if (state.driverTrafficRefreshHandle) {
-    window.clearInterval(state.driverTrafficRefreshHandle);
   }
 
   state.lastDriverTick = null;
@@ -3060,11 +3490,6 @@ function startDriverSimulation() {
 
   state.driverAnimationHandle = requestAnimationFrame(animate);
   window.setInterval(() => reconcileDriverTargets(false), DRIVER_RECONCILE_INTERVAL_MS);
-  refreshMovingDriverTrafficContexts();
-  state.driverTrafficRefreshHandle = window.setInterval(
-    () => refreshMovingDriverTrafficContexts(),
-    DRIVER_TRAFFIC_REFRESH_INTERVAL_MS
-  );
 }
 
 function reconcileDriverTargets(force) {
@@ -3178,7 +3603,7 @@ function updateDriverPositions(deltaSeconds) {
       continue;
     }
 
-    advanceDriverAlongRoute(driver, getDriverMoveDistanceMeters(driver, deltaSeconds));
+    advanceDriverAlongRoute(driver, DRIVER_SPEED_MPS * deltaSeconds);
   }
 
   syncMatchedDriverRoute();
@@ -3206,6 +3631,17 @@ function getDriverTargets() {
   const availableStandby = Math.min(available, Math.max(0, Math.round(available * standbyRatio)));
   const assignedPickup = Math.ceil(assigned / 2);
   const assignedOnTrip = Math.max(0, assigned - assignedPickup);
+
+  if (![active, assigned, availableStandby, assignedPickup, assignedOnTrip].every((value) => Number.isFinite(value))) {
+    return {
+      active: 25,
+      assigned: 4,
+      assignedPickup: 2,
+      assignedOnTrip: 2,
+      availableStandby: 15,
+      availableMoving: 6
+    };
+  }
 
   return {
     active,
@@ -3270,7 +3706,7 @@ function summarizeDrivers() {
 function updateDriverSummary(targets = getDriverTargets()) {
   const counts = summarizeDrivers();
   driverSummaryText.textContent = `${counts.active} active now: ${counts.availableStandby} standby, ${counts.availableMoving} repositioning, ${counts.assignedPickup} going to passenger, ${counts.assignedOnTrip} on-trip`;
-  driverBreakdownText.textContent = `Target now: ${targets.active} active. 60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you, speed adjusts with TomTom traffic and weather.`;
+  driverBreakdownText.textContent = `Target now: ${targets.active} active. 60 cars, 40 motorcycles. Green = available, orange = going to passenger, red = on-trip, yellow = suggested or matched to you, speed = ${DRIVER_SPEED_KPH} km/h.`;
   updateMapLegend();
 }
 
@@ -3291,7 +3727,6 @@ function deactivateDriver(driver) {
   driver.heldForOffer = false;
   driver.resumeAfterOffer = false;
   driver.lockedToUser = false;
-  clearDriverMovementContext(driver);
   updateDriverMarker(driver);
 }
 
@@ -3301,7 +3736,7 @@ function placeDriverIntoStandby(driver, landmark) {
     return;
   }
 
-  const node = state.nodeIndex.get(targetLandmark.nodeId);
+  const node = state.nodeIndex.get(targetLandmark.nodeId) || getNearestNode(targetLandmark.lat, targetLandmark.lng);
   if (!node) {
     return;
   }
@@ -3316,7 +3751,6 @@ function placeDriverIntoStandby(driver, landmark) {
   driver.heldForOffer = false;
   driver.resumeAfterOffer = false;
   driver.lockedToUser = false;
-  clearDriverMovementContext(driver);
   driver.lat = node.lat;
   driver.lng = node.lng;
   updateDriverMarker(driver);
@@ -3357,7 +3791,6 @@ function stopDriverAtNearestNode(driver) {
   driver.heldForOffer = false;
   driver.resumeAfterOffer = false;
   driver.lockedToUser = false;
-  clearDriverMovementContext(driver);
   driver.lat = node.lat;
   driver.lng = node.lng;
   updateDriverMarker(driver);
@@ -3392,20 +3825,9 @@ function assignDriverRoute(driver, status) {
   driver.heldForOffer = false;
   driver.resumeAfterOffer = false;
   driver.lockedToUser = false;
-  clearDriverMovementContext(driver);
   driver.lat = originNode.lat;
   driver.lng = originNode.lng;
   updateDriverMarker(driver);
-}
-
-function clearDriverMovementContext(driver) {
-  driver.movementTrafficRatio = null;
-  driver.movementTrafficSource = "";
-  driver.movementWeatherMultiplier = null;
-  driver.movementWeatherSource = "";
-  driver.movementTrafficSegmentKey = "";
-  driver.movementTrafficRefreshPending = false;
-  driver.lastMovementTrafficRefreshAt = 0;
 }
 
 function advanceDriverAlongRoute(driver, moveDistanceMeters) {
@@ -3429,7 +3851,6 @@ function advanceDriverAlongRoute(driver, moveDistanceMeters) {
       driver.currentNodeId = toNode.id;
       driver.lat = toNode.lat;
       driver.lng = toNode.lng;
-      scheduleDriverSegmentTrafficRefresh(driver);
       continue;
     }
 
@@ -3447,26 +3868,9 @@ function advanceDriverAlongRoute(driver, moveDistanceMeters) {
   updateDriverMarker(driver);
 }
 
-function scheduleDriverSegmentTrafficRefresh(driver) {
-  if (!isMovingDriver(driver)) {
-    return;
-  }
-
-  const segmentKey = getDriverCurrentSegmentKey(driver);
-  if (!segmentKey || driver.movementTrafficSegmentKey === segmentKey) {
-    return;
-  }
-
-  const now = Date.now();
-  if (driver.movementTrafficRefreshPending || now - (driver.lastMovementTrafficRefreshAt || 0) < DRIVER_SEGMENT_TRAFFIC_REFRESH_COOLDOWN_MS) {
-    return;
-  }
-
-  refreshDriverTrafficContext(driver, { segmentKey });
-}
-
 function handleDriverArrival(driver) {
   if (driver.lockedToUser && state.ridePhase === "driver_to_pickup") {
+    dismissSmartPickupRecommendation(false);
     const tripPath = state.pendingDriverOffer?.tripPath || (state.userPoint && state.dropoffPoint
       ? getPathBetweenNodes(state.userPoint.id, state.dropoffPoint.id)
       : null);
@@ -3480,14 +3884,13 @@ function handleDriverArrival(driver) {
       driver.targetUserNodeId = state.dropoffPoint.id;
       driver.lat = state.userPoint.lat;
       driver.lng = state.userPoint.lng;
-      applyHeuristicMovementTraffic(driver, tripPath.distance);
       state.ridePhase = "on_trip";
       state.userPanelTab = "trip";
       routeText.textContent = `On-trip: ${(tripPath.distance / 1000).toFixed(2)} km remaining`;
       routeTrafficText.textContent = "Route traffic: drop-off leg is now active";
       driverTrafficText.textContent = `Driver ${driver.id} picked you up and is now taking you to the drop-off`;
       updateOfferCard("On-trip now", "Pickup complete. Your driver is now carrying you to the drop-off point.");
-      loadRouteTrafficSummary(tripPath.nodeIds, driver, tripPath.distance);
+      loadRouteTrafficSummary(tripPath.nodeIds);
       setStatus(`Driver ${driver.id} picked you up. Heading to your drop-off point now.`);
       updateDriverMarker(driver);
       updateMapLegend();
@@ -3497,6 +3900,7 @@ function handleDriverArrival(driver) {
   }
 
   if (driver.lockedToUser && state.ridePhase === "on_trip") {
+    dismissSmartPickupRecommendation(false);
     const dropoffNode = state.dropoffPoint;
     state.selectedDriverId = null;
     state.ridePhase = "idle";
@@ -3572,6 +3976,56 @@ function pickWeightedLandmark(excludeNodeId = null) {
   }
 
   return candidates[candidates.length - 1];
+}
+
+function ensureDriverSimulationHasActiveFleet() {
+  const counts = summarizeDrivers();
+  if (counts.active > 0 || !state.drivers.length || !state.nodeIndex.size) {
+    return;
+  }
+
+  const fallbackTarget = getDriverTargets();
+  const fallbackActive = Math.max(10, Number.isFinite(fallbackTarget.active) ? fallbackTarget.active : 25);
+  let activated = 0;
+
+  for (const driver of state.drivers) {
+    if (activated >= fallbackActive) {
+      break;
+    }
+
+    const landmark = pickWeightedLandmark();
+    if (!landmark) {
+      break;
+    }
+
+    placeDriverIntoStandby(driver, landmark);
+    if (driver.status === "standby_available") {
+      activated += 1;
+    }
+  }
+
+  if (!activated) {
+    const centerNode = getNearestNode(state.centerPoint.lat, state.centerPoint.lng);
+    if (!centerNode) {
+      return;
+    }
+
+    for (const driver of state.drivers.slice(0, fallbackActive)) {
+      driver.status = "standby_available";
+      driver.currentNodeId = centerNode.id;
+      driver.routeNodeIds = [];
+      driver.routeSegmentIndex = 0;
+      driver.routeSegmentProgress = 0;
+      driver.targetLandmarkId = null;
+      driver.targetUserNodeId = null;
+      driver.heldForOffer = false;
+      driver.resumeAfterOffer = false;
+      driver.lockedToUser = false;
+      driver.lat = centerNode.lat;
+      driver.lng = centerNode.lng;
+      updateDriverMarker(driver);
+    }
+  }
 }
 
 function getLandmarkById(landmarkId) {
@@ -3674,23 +4128,7 @@ function buildDriverPopup(driver) {
     ? `<br>${driver.lockedToUser ? "Matched to you" : "Suggested to you"}`
     : "";
   const landmarkText = landmark ? `<br>Target: ${landmark.name}` : "";
-  const movementSpeedText = state.viewMode === "admin"
-    ? `<br>Movement speed: ${formatDriverMovementSpeed(driver)}`
-    : "";
-  return `<strong>Driver ${driver.id}</strong><br>${driver.type === "car" ? "Car" : "Motorcycle"}<br>${stateLabelMap[driver.status] || driver.status}${selectedText}${landmarkText}${movementSpeedText}`;
-}
-
-function formatDriverMovementSpeed(driver) {
-  if (!isMovingDriver(driver)) {
-    return "Stopped";
-  }
-
-  const remainingDistance = getDriverRemainingDistance(driver);
-  const effectiveSpeedKph = getEffectiveDriverSpeedKph(driver, remainingDistance);
-  const sourceLabel = driver.movementTrafficSource === "tomtom_live"
-    ? "TomTom live traffic + weather"
-    : "traffic estimate + weather";
-  return `${effectiveSpeedKph.toFixed(1)} km/h (${sourceLabel})`;
+  return `<strong>Driver ${driver.id}</strong><br>${driver.type === "car" ? "Car" : "Motorcycle"}<br>${stateLabelMap[driver.status] || driver.status}${selectedText}${landmarkText}`;
 }
 
 function isMovingDriver(driver) {
@@ -3714,7 +4152,16 @@ function getManilaHourValue() {
       .map((part) => [part.type, Number(part.value)])
   );
 
-  return parts.hour + (parts.minute / 60) + (parts.second / 3600);
+  const hour = Number(parts.hour);
+  const minute = Number(parts.minute);
+  const second = Number(parts.second);
+
+  if (![hour, minute, second].every((value) => Number.isFinite(value))) {
+    const fallbackNow = new Date();
+    return fallbackNow.getHours() + (fallbackNow.getMinutes() / 60) + (fallbackNow.getSeconds() / 3600);
+  }
+
+  return hour + (minute / 60) + (second / 3600);
 }
 
 function lerp(start, end, amount) {
@@ -3946,113 +4393,6 @@ function setWeatherText(message) {
   weatherText.textContent = message;
 }
 
-async function refreshMovingDriverTrafficContexts() {
-  if (state.isRefreshingDriverTraffic) {
-    return;
-  }
-
-  const movingDrivers = state.drivers.filter(isMovingDriver);
-  if (!movingDrivers.length) {
-    return;
-  }
-
-  const batch = getDriverTrafficRefreshBatch(movingDrivers);
-  state.isRefreshingDriverTraffic = true;
-
-  try {
-    await refreshDriverTrafficContextBatch(batch);
-  } catch (error) {
-    console.warn("Driver traffic refresh unavailable, using heuristic movement traffic.", error);
-    for (const driver of batch) {
-      applyHeuristicMovementTraffic(driver);
-    }
-  } finally {
-    state.isRefreshingDriverTraffic = false;
-  }
-}
-
-async function refreshDriverTrafficContext(driver, options = {}) {
-  if (!isMovingDriver(driver) || driver.movementTrafficRefreshPending) {
-    return;
-  }
-
-  driver.movementTrafficRefreshPending = true;
-  try {
-    await refreshDriverTrafficContextBatch([driver], options);
-  } finally {
-    driver.movementTrafficRefreshPending = false;
-  }
-}
-
-async function refreshDriverTrafficContextBatch(drivers, options = {}) {
-  const entries = drivers
-    .filter((driver) => isMovingDriver(driver))
-    .map((driver) => ({
-      driver,
-      routeKey: driver.routeNodeIds.join("|"),
-      segmentKey: options.segmentKey || getDriverCurrentSegmentKey(driver),
-      force: Boolean(options.force),
-      sample: {
-        nodeId: getDriverTrafficSampleNodeId(driver),
-        lat: driver.lat,
-        lng: driver.lng,
-        nearbyCandidateLimit: DRIVER_TRAFFIC_NEARBY_CANDIDATES
-      }
-    }));
-
-  if (!entries.length) {
-    return;
-  }
-
-  if (!state.usingPythonBackend || !state.backendSupportsTrafficProxy) {
-    for (const entry of entries) {
-      applyHeuristicMovementTraffic(entry.driver, null, entry.routeKey, entry.segmentKey);
-    }
-    return;
-  }
-
-  const results = await fetchTrafficSamplesFromBackend(entries.map((entry) => entry.sample));
-  entries.forEach((entry, index) => {
-    const result = results[index];
-    if (result?.traffic) {
-      applyLiveMovementTraffic(entry.driver, getTrafficRatioFromSegment(result.traffic), entry.routeKey, entry.segmentKey);
-      return;
-    }
-
-    applyHeuristicMovementTraffic(entry.driver, null, entry.routeKey, entry.segmentKey);
-  });
-}
-
-function getDriverTrafficRefreshBatch(movingDrivers) {
-  const batchSize = Math.min(DRIVER_TRAFFIC_REFRESH_BATCH_SIZE, movingDrivers.length);
-  const startIndex = state.driverTrafficRefreshCursor % movingDrivers.length;
-  const batch = [];
-
-  for (let index = 0; index < batchSize; index += 1) {
-    batch.push(movingDrivers[(startIndex + index) % movingDrivers.length]);
-  }
-
-  state.driverTrafficRefreshCursor = (startIndex + batchSize) % movingDrivers.length;
-  return batch;
-}
-
-function getDriverTrafficSampleNodeId(driver) {
-  return driver.currentNodeId
-    || driver.routeNodeIds[driver.routeSegmentIndex]
-    || driver.routeNodeIds[driver.routeSegmentIndex + 1]
-    || null;
-}
-
-function getDriverCurrentSegmentKey(driver) {
-  if (!driver) {
-    return "";
-  }
-
-  const fromNodeId = driver.routeNodeIds[driver.routeSegmentIndex];
-  const toNodeId = driver.routeNodeIds[driver.routeSegmentIndex + 1];
-  return fromNodeId && toNodeId ? `${fromNodeId}->${toNodeId}` : "";
-}
-
 async function loadTrafficForPoint(pointLabel, node) {
   const target = pointLabel === "user"
     ? userTrafficText
@@ -4080,9 +4420,8 @@ async function loadTrafficForPoint(pointLabel, node) {
   }
 }
 
-async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDistanceMeters = null) {
+async function loadRouteTrafficSummary(nodeIds) {
   routeTrafficText.textContent = "Route traffic: loading...";
-  const routeKey = nodeIds.join("|");
 
   const sampleIds = sampleRouteNodeIds(nodeIds, 6);
   const sampleNodes = sampleIds
@@ -4091,7 +4430,6 @@ async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDist
 
   if (!sampleNodes.length) {
     routeTrafficText.textContent = "Route traffic: unavailable near this route right now";
-    applyHeuristicMovementTraffic(movementDriver, routeDistanceMeters, routeKey, getDriverCurrentSegmentKey(movementDriver));
     return;
   }
 
@@ -4111,7 +4449,6 @@ async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDist
   if (!validSamples.length) {
     const fallbackNotice = results.find((result) => result?.notice)?.notice || "Route traffic: unavailable near this route right now";
     routeTrafficText.textContent = fallbackNotice.replace(/^Traffic source:/, "Route traffic:");
-    applyHeuristicMovementTraffic(movementDriver, routeDistanceMeters, routeKey, getDriverCurrentSegmentKey(movementDriver));
     return;
   }
 
@@ -4123,47 +4460,6 @@ async function loadRouteTrafficSummary(nodeIds, movementDriver = null, routeDist
   const failedSamples = results.length - validSamples.length;
   const failureSuffix = failedSamples ? `, ${failedSamples} sample(s) failed` : "";
   routeTrafficText.textContent = `Route traffic: ${describeTrafficRatio(averageRatio)} from ${validSamples.length} live road samples${failureSuffix}. Source: TomTom live traffic.`;
-  applyLiveMovementTraffic(movementDriver, averageRatio, routeKey, getDriverCurrentSegmentKey(movementDriver));
-}
-
-function applyLiveMovementTraffic(driver, trafficRatio, routeKey = "", segmentKey = "") {
-  if (!isMovementContextStillActive(driver, routeKey)) {
-    return;
-  }
-
-  driver.movementTrafficRatio = clampValue(trafficRatio, 0.15, 1);
-  driver.movementTrafficSource = "tomtom_live";
-  driver.movementWeatherMultiplier = state.weatherContext?.multiplier || driver.movementWeatherMultiplier || 1;
-  driver.movementWeatherSource = state.weatherContext?.source || driver.movementWeatherSource || "weather_fallback";
-  driver.movementTrafficSegmentKey = segmentKey || getDriverCurrentSegmentKey(driver);
-  driver.lastMovementTrafficRefreshAt = Date.now();
-  updateDriverMarker(driver);
-}
-
-function applyHeuristicMovementTraffic(driver, routeDistanceMeters = null, routeKey = "", segmentKey = "") {
-  if (!isMovementContextStillActive(driver, routeKey)) {
-    return;
-  }
-
-  const weatherMultiplier = state.weatherContext?.multiplier || driver.movementWeatherMultiplier || 1;
-  const distanceMeters = typeof routeDistanceMeters === "number"
-    ? routeDistanceMeters
-    : getDriverRemainingDistance(driver);
-  driver.movementTrafficRatio = estimateHeuristicTrafficRatio(distanceMeters, weatherMultiplier);
-  driver.movementTrafficSource = "heuristic_fallback";
-  driver.movementWeatherMultiplier = weatherMultiplier;
-  driver.movementWeatherSource = state.weatherContext?.source || driver.movementWeatherSource || "weather_fallback";
-  driver.movementTrafficSegmentKey = segmentKey || getDriverCurrentSegmentKey(driver);
-  driver.lastMovementTrafficRefreshAt = Date.now();
-  updateDriverMarker(driver);
-}
-
-function isMovementContextStillActive(driver, routeKey = "") {
-  if (!driver) {
-    return false;
-  }
-
-  return !routeKey || driver.routeNodeIds.join("|") === routeKey;
 }
 
 function sampleRouteNodeIds(nodeIds, maxSamples) {

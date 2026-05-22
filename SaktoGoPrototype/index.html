@@ -42,6 +42,13 @@
     <div class="phone-shell" role="region" aria-label="Mobile phone viewport">
       <div class="phone-notch" aria-hidden="true"></div>
       <div class="phone-screen">
+        <div id="match-loading-overlay" class="match-loading-overlay" hidden aria-live="polite" aria-busy="true">
+          <div class="match-loading-card">
+            <div class="match-loading-spinner" aria-hidden="true"></div>
+            <strong id="match-loading-title">Finding the best driver</strong>
+            <small id="match-loading-text" class="detail-text">Checking route distance, traffic, weather, reliability, and movement.</small>
+          </div>
+        </div>
         <div class="shell">
     <aside class="panel">
       <nav class="mobile-panel-nav" aria-label="User panel sections">
@@ -144,6 +151,34 @@
           <button id="accept-driver-btn" class="action-btn" type="button">Accept Driver</button>
           <button id="other-driver-btn" class="ghost-btn" type="button">Suggest Other Driver</button>
           <button id="cancel-request-btn" class="ghost-btn" type="button">Cancel Request</button>
+        </div>
+      </div>
+
+      <div id="pickup-suggestion-card" class="control-group pickup-suggestion-card" data-mobile-section="driver trip" hidden>
+        <p class="control-group__label">Smart Pickup Recommendation</p>
+        <strong id="pickup-suggestion-title">Suggested pickup point available</strong>
+        <small id="pickup-suggestion-detail" class="detail-text">A nearby pickup point may improve driver access.</small>
+        <div class="offer-summary" aria-label="Pickup recommendation summary">
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Walking distance</span>
+            <strong id="pickup-suggestion-walk">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">ETA improvement</span>
+            <strong id="pickup-suggestion-eta">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Road type</span>
+            <strong id="pickup-suggestion-road">--</strong>
+          </div>
+          <div class="offer-summary__item">
+            <span class="offer-summary__label">Reason</span>
+            <strong id="pickup-suggestion-reason">--</strong>
+          </div>
+        </div>
+        <div class="button-row button-row--offer">
+          <button id="use-suggested-pickup-btn" class="action-btn" type="button">Use Suggested Pickup</button>
+          <button id="keep-original-pickup-btn" class="ghost-btn" type="button">Keep Original Pickup</button>
         </div>
       </div>
 
