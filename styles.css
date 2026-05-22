@@ -586,6 +586,108 @@ button {
   background: #d1495b;
 }
 
+.admin-rider-list-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.admin-rider-list-heading .control-group__label {
+  margin-bottom: 10px;
+}
+
+.admin-rider-list-heading strong {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.admin-rider-list {
+  display: grid;
+  gap: 8px;
+  max-height: 310px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.admin-rider-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(84, 104, 90, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.admin-rider-row:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(11, 110, 79, 0.22);
+}
+
+.admin-rider-row__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px rgba(23, 51, 38, 0.12);
+}
+
+.admin-rider-row__dot--standby,
+.admin-rider-row__dot--moving {
+  background: #0b8f65;
+}
+
+.admin-rider-row__dot--pickup {
+  background: #f4a261;
+}
+
+.admin-rider-row__dot--ontrip {
+  background: #d1495b;
+}
+
+.admin-rider-row__main {
+  min-width: 0;
+}
+
+.admin-rider-row__main strong,
+.admin-rider-row__main small,
+.admin-rider-row__meta {
+  display: block;
+}
+
+.admin-rider-row__main strong {
+  font-size: 0.96rem;
+  line-height: 1.25;
+}
+
+.admin-rider-row__main small,
+.admin-rider-row__meta {
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.admin-rider-row__meta {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.admin-rider-list__empty {
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
 .map-stage {
   position: relative;
   background: #d8e5d6;

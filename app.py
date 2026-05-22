@@ -30,6 +30,8 @@ USER_POINT_NODE_ID = "__user_point__"
 STATIC_ROOT = Path(__file__).resolve().parent
 PASSENGER_DRIVER_MODULE_PATH = STATIC_ROOT / "passenger-driver.py"
 WEATHER_CACHE_TTL_SECONDS = 600
+DATA_CACHE_DIR = STATIC_ROOT / ".sakto-cache"
+DATA_CACHE_VERSION = 1
 
 
 def load_passenger_driver_module() -> Any:
@@ -142,7 +144,36 @@ class OlongapoRouteService:
         with urlopen(request, timeout=60) as response:
             return json.load(response)
 
+    def load_data_cache(self, name: str) -> Any | None:
+        cache_path = DATA_CACHE_DIR / f"{name}-v{DATA_CACHE_VERSION}.json"
+        try:
+            if not cache_path.exists():
+                return None
+
+            with cache_path.open("r", encoding="utf-8") as cache_file:
+                payload = json.load(cache_file)
+            if payload.get("cacheVersion") != DATA_CACHE_VERSION:
+                return None
+            return payload.get("data")
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def save_data_cache(self, name: str, data: Any) -> None:
+        cache_path = DATA_CACHE_DIR / f"{name}-v{DATA_CACHE_VERSION}.json"
+        temp_path = cache_path.with_suffix(".tmp")
+        try:
+            DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            with temp_path.open("w", encoding="utf-8") as cache_file:
+                json.dump({"cacheVersion": DATA_CACHE_VERSION, "data": data}, cache_file)
+            temp_path.replace(cache_path)
+        except OSError:
+            return
+
     def fetch_boundary(self) -> dict[str, Any]:
+        cached_boundary = self.load_data_cache("olongapo-boundary")
+        if cached_boundary:
+            return cached_boundary
+
         params = urlencode(
             {
                 "q": "Olongapo City, Philippines",
@@ -154,9 +185,14 @@ class OlongapoRouteService:
         results = self.fetch_json(f"{NOMINATIM_URL}?{params}")
         if not results or "geojson" not in results[0]:
             raise RuntimeError("No Olongapo boundary was returned.")
+        self.save_data_cache("olongapo-boundary", results[0])
         return results[0]
 
     def fetch_road_network(self, boundingbox: list[str]) -> dict[str, Any]:
+        cached_roads = self.load_data_cache("olongapo-roads")
+        if cached_roads:
+            return cached_roads
+
         south, north, west, east = map(float, boundingbox)
         query = f"""
         [out:json][timeout:60];
@@ -166,14 +202,20 @@ class OlongapoRouteService:
         (._;>;);
         out body;
         """.strip()
-        return self.fetch_json(
+        payload = self.fetch_json(
             OVERPASS_URL,
             method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
             data=f"data={urlencode({'': query})[1:]}".encode("utf-8"),
         )
+        self.save_data_cache("olongapo-roads", payload)
+        return payload
 
     def fetch_landmark_data(self, boundingbox: list[str]) -> dict[str, Any]:
+        cached_landmarks = self.load_data_cache("olongapo-landmarks")
+        if cached_landmarks:
+            return cached_landmarks
+
         south, north, west, east = map(float, boundingbox)
         query = f"""
         [out:json][timeout:60];
@@ -187,12 +229,14 @@ class OlongapoRouteService:
         );
         out center tags;
         """.strip()
-        return self.fetch_json(
+        payload = self.fetch_json(
             OVERPASS_URL,
             method="POST",
             headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
             data=f"data={urlencode({'': query})[1:]}".encode("utf-8"),
         )
+        self.save_data_cache("olongapo-landmarks", payload)
+        return payload
 
     def load_weather(self) -> dict[str, Any]:
         self.ensure_bootstrapped()
@@ -837,6 +881,10 @@ class AppHandler(BaseHTTPRequestHandler):
         file_path = (STATIC_ROOT / relative_path).resolve()
 
         if STATIC_ROOT not in file_path.parents and file_path != STATIC_ROOT:
+            self.respond_json({"error": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
+            return
+
+        if DATA_CACHE_DIR in file_path.parents or file_path == DATA_CACHE_DIR:
             self.respond_json({"error": "Forbidden"}, status=HTTPStatus.FORBIDDEN)
             return
 

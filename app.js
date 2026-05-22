@@ -96,6 +96,8 @@ const phoneScreen = document.querySelector(".phone-screen");
 const appShell = document.querySelector(".shell");
 const adminDriverFilterBtns = document.querySelectorAll("[data-admin-driver-filter]");
 const adminFilterText = document.getElementById("admin-filter-text");
+const adminRiderList = document.getElementById("admin-rider-list");
+const adminRiderListCount = document.getElementById("admin-rider-list-count");
 const adminFilterCountEls = {
   all: document.getElementById("filter-all-count"),
   active: document.getElementById("filter-active-count"),
@@ -472,10 +474,12 @@ function updateMapPrivacyLayers() {
 
 function updateMapLegend() {
   if (!mapLegendControl._container) {
+    updateAdminDriverFilterUI();
     return;
   }
 
   renderMapLegend(mapLegendControl._container);
+  updateAdminDriverFilterUI();
 }
 
 function getMapLegendCounts() {
@@ -513,6 +517,8 @@ function updateAdminDriverFilterUI() {
     const visibleCount = counts[state.adminDriverFilter] ?? counts.all;
     adminFilterText.textContent = `Showing ${visibleCount.toLocaleString()} ${label.toLowerCase()} rider${visibleCount === 1 ? "" : "s"}.`;
   }
+
+  renderAdminRiderList();
 }
 
 function getAdminDriverFilterCounts() {
@@ -552,6 +558,117 @@ function doesDriverMatchAdminFilter(driver) {
     default:
       return true;
   }
+}
+
+function renderAdminRiderList() {
+  if (!adminRiderList) {
+    return;
+  }
+
+  const visibleDrivers = state.drivers
+    .filter((driver) => driver.status !== "inactive" && doesDriverMatchAdminFilter(driver))
+    .sort(compareDriversForAdminList)
+    .slice(0, 40);
+
+  if (adminRiderListCount) {
+    adminRiderListCount.textContent = `${visibleDrivers.length.toLocaleString()} shown`;
+  }
+
+  if (!visibleDrivers.length) {
+    const empty = document.createElement("div");
+    empty.className = "admin-rider-list__empty";
+    empty.textContent = "No riders match this filter right now.";
+    adminRiderList.replaceChildren(empty);
+    return;
+  }
+
+  const rows = visibleDrivers.map((driver) => {
+    const row = document.createElement("button");
+    row.className = "admin-rider-row";
+    row.type = "button";
+    row.addEventListener("click", () => focusAdminDriver(driver));
+
+    const dot = document.createElement("span");
+    dot.className = `admin-rider-row__dot admin-rider-row__dot--${getAdminDriverStatusClass(driver.status)}`;
+    dot.setAttribute("aria-hidden", "true");
+
+    const main = document.createElement("span");
+    main.className = "admin-rider-row__main";
+    const title = document.createElement("strong");
+    title.textContent = `Driver ${driver.id} | ${driver.type === "car" ? "Car" : "Motorcycle"}`;
+    const detail = document.createElement("small");
+    detail.textContent = getAdminDriverStatusLabel(driver.status);
+    main.replaceChildren(title, detail);
+
+    const meta = document.createElement("span");
+    meta.className = "admin-rider-row__meta";
+    meta.textContent = getAdminDriverTargetLabel(driver);
+
+    row.replaceChildren(dot, main, meta);
+    return row;
+  });
+
+  adminRiderList.replaceChildren(...rows);
+}
+
+function compareDriversForAdminList(left, right) {
+  const statusOrder = {
+    assigned_pickup: 0,
+    assigned_ontrip: 1,
+    moving_available: 2,
+    standby_available: 3,
+    inactive: 4
+  };
+  const leftOrder = statusOrder[left.status] ?? 5;
+  const rightOrder = statusOrder[right.status] ?? 5;
+  if (leftOrder !== rightOrder) {
+    return leftOrder - rightOrder;
+  }
+
+  return left.id - right.id;
+}
+
+function getAdminDriverStatusClass(status) {
+  const classes = {
+    standby_available: "standby",
+    moving_available: "moving",
+    assigned_pickup: "pickup",
+    assigned_ontrip: "ontrip"
+  };
+  return classes[status] || "standby";
+}
+
+function getAdminDriverStatusLabel(status) {
+  const labels = {
+    standby_available: "Standby available",
+    moving_available: "Repositioning",
+    assigned_pickup: "Going to passenger",
+    assigned_ontrip: "With passenger"
+  };
+  return labels[status] || "Inactive";
+}
+
+function getAdminDriverTargetLabel(driver) {
+  if (driver.lockedToUser) {
+    return "Matched";
+  }
+
+  const landmark = getLandmarkById(driver.targetLandmarkId);
+  if (!landmark) {
+    return "--";
+  }
+
+  return landmark.name.length > 18 ? `${landmark.name.slice(0, 18)}...` : landmark.name;
+}
+
+function focusAdminDriver(driver) {
+  if (!driver || driver.status === "inactive") {
+    return;
+  }
+
+  map.panTo([driver.lat, driver.lng], { animate: true, duration: 0.25 });
+  driver.marker.openPopup();
+  setStatus(`Admin focused Driver ${driver.id}.`);
 }
 
 function setSelectionMode(mode) {
