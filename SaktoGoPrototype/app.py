@@ -37,6 +37,41 @@ TRAFFIC_CACHE_TTL_SECONDS = 45
 TRAFFIC_REQUEST_TIMEOUT_SECONDS = 8
 USER_POINT_NODE_ID = "__user_point__"
 DROPOFF_POINT_NODE_ID = "__dropoff_point__"
+SMART_PICKUP_SEARCH_RADIUS_METERS = 350
+SMART_PICKUP_MAX_WALK_METERS = 400
+SMART_PICKUP_POOR_ROAD_TYPES = {"motorway", "motorway_link", "track"}
+SMART_PICKUP_ROAD_TYPE_SCORES = {
+    "motorway": 0.10,
+    "trunk": 0.45,
+    "primary": 1.00,
+    "secondary": 0.95,
+    "tertiary": 0.90,
+    "residential": 0.75,
+    "service": 0.60,
+    "living_street": 0.50,
+    "unclassified": 0.65,
+    "motorway_link": 0.15,
+    "primary_link": 0.85,
+    "secondary_link": 0.85,
+    "tertiary_link": 0.80,
+    "track": 0.05,
+}
+SMART_PICKUP_SAFETY_SCORES = {
+    "motorway": 0.05,
+    "motorway_link": 0.10,
+    "track": 0.10,
+    "trunk": 0.45,
+    "primary": 0.82,
+    "primary_link": 0.72,
+    "secondary": 0.88,
+    "secondary_link": 0.78,
+    "tertiary": 0.90,
+    "tertiary_link": 0.84,
+    "residential": 0.86,
+    "service": 0.70,
+    "living_street": 0.76,
+    "unclassified": 0.68,
+}
 STATIC_ROOT = Path(__file__).resolve().parent
 PASSENGER_DRIVER_MODULE_PATH = STATIC_ROOT / "passenger-driver.py"
 
@@ -67,6 +102,8 @@ class RoadSegment:
     from_node_id: str
     to_node_id: str
     distance: float
+    road_type: str
+    road_type_label: str
 
 
 @dataclass
@@ -90,6 +127,8 @@ class SnappedRoadPoint:
     distance_to_segment: float
     distance_from_start: float
     distance_to_end: float
+    road_type: str = "unclassified"
+    road_type_label: str = "unclassified road"
 
 
 class OlongapoRouteService:
@@ -101,6 +140,7 @@ class OlongapoRouteService:
         self.graph: dict[str, list[dict[str, Any]]] = {}
         self.node_index: dict[str, Node] = {}
         self.road_segments: list[RoadSegment] = []
+        self.node_road_types: dict[str, set[str]] = {}
         self.landmarks: list[Landmark] = []
         self.route_cache: dict[tuple[str, str], dict[str, Any] | None] = {}
         self.traffic_flow_cache: dict[str, dict[str, Any]] = {}
@@ -444,6 +484,7 @@ class OlongapoRouteService:
         self.graph.clear()
         self.node_index.clear()
         self.road_segments.clear()
+        self.node_road_types.clear()
         self.route_cache.clear()
 
         for way in ways:
@@ -468,8 +509,12 @@ class OlongapoRouteService:
                         from_node_id=from_node.id,
                         to_node_id=to_node.id,
                         distance=distance,
+                        road_type=normalize_road_type(tags.get("highway")),
+                        road_type_label=describe_road_type(tags.get("highway")),
                     )
                 )
+                self.node_road_types.setdefault(from_node.id, set()).add(normalize_road_type(tags.get("highway")))
+                self.node_road_types.setdefault(to_node.id, set()).add(normalize_road_type(tags.get("highway")))
                 self.add_edge(from_node, to_node, distance)
 
                 if not is_one_way:
@@ -532,6 +577,230 @@ class OlongapoRouteService:
 
         self.landmarks = sorted(landmarks, key=lambda item: item.weight, reverse=True)
 
+    def get_node_road_profile(self, node_id: str) -> dict[str, Any]:
+        road_types = self.node_road_types.get(node_id) or {"unclassified"}
+        best_type = max(
+            road_types,
+            key=lambda road_type: SMART_PICKUP_ROAD_TYPE_SCORES.get(road_type, SMART_PICKUP_ROAD_TYPE_SCORES["unclassified"]),
+        )
+        return {
+            "roadType": best_type,
+            "roadTypeLabel": describe_road_type(best_type),
+            "roadTypeScore": SMART_PICKUP_ROAD_TYPE_SCORES.get(best_type, SMART_PICKUP_ROAD_TYPE_SCORES["unclassified"]),
+        }
+
+    def get_nearby_nodes(self, lat: float, lng: float, radius_meters: float) -> list[Node]:
+        query = Node(id="query", lat=lat, lng=lng)
+        nearby: list[tuple[float, Node]] = []
+        for node in self.node_index.values():
+            if node.id in {USER_POINT_NODE_ID, DROPOFF_POINT_NODE_ID}:
+                continue
+            distance = haversine_distance(query, node)
+            if distance <= radius_meters:
+                nearby.append((distance, node))
+        nearby.sort(key=lambda item: item[0])
+        return [node for _, node in nearby]
+
+    def recommend_pickup_point(
+        self,
+        *,
+        original_pickup_lat: float,
+        original_pickup_lng: float,
+        dropoff_lat: float,
+        dropoff_lng: float,
+        driver: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.ensure_bootstrapped()
+        weather_context = PASSENGER_DRIVER_MODULE.build_weather_context(self)
+        original_snapped = self.get_nearest_road_point(original_pickup_lat, original_pickup_lng)
+        dropoff_snapped = self.get_nearest_road_point(dropoff_lat, dropoff_lng)
+        if not original_snapped or not dropoff_snapped:
+            return {"suggested": False, "reason": "Pickup recommendation unavailable for this route."}
+
+        graph, node_index = clone_graph_for_pickup_recommendation(self)
+        add_temporary_snapped_point_to_graph(self, graph, node_index, original_snapped, USER_POINT_NODE_ID)
+        add_temporary_snapped_point_to_graph(self, graph, node_index, dropoff_snapped, DROPOFF_POINT_NODE_ID)
+
+        driver_start_node = PASSENGER_DRIVER_MODULE.get_driver_route_start_node(self, driver)
+        if not driver_start_node:
+            return {"suggested": False, "reason": "Driver start node was unavailable for pickup recommendation."}
+
+        candidate_entries: list[dict[str, Any]] = [
+            {
+                "candidateId": USER_POINT_NODE_ID,
+                "lat": original_snapped.lat,
+                "lng": original_snapped.lng,
+                "roadType": original_snapped.road_type,
+                "roadTypeLabel": original_snapped.road_type_label,
+                "walkingDistanceMeters": 0.0,
+                "isOriginal": True,
+            }
+        ]
+
+        for node in self.get_nearby_nodes(original_pickup_lat, original_pickup_lng, SMART_PICKUP_SEARCH_RADIUS_METERS):
+            profile = self.get_node_road_profile(node.id)
+            candidate_entries.append(
+                {
+                    "candidateId": node.id,
+                    "lat": node.lat,
+                    "lng": node.lng,
+                    "roadType": profile["roadType"],
+                    "roadTypeLabel": profile["roadTypeLabel"],
+                    "walkingDistanceMeters": haversine_distance(
+                        Node(id="origin", lat=original_pickup_lat, lng=original_pickup_lng),
+                        node,
+                    ),
+                    "isOriginal": False,
+                }
+            )
+
+        viable_alternatives = [
+            candidate
+            for candidate in candidate_entries
+            if candidate["roadType"] not in SMART_PICKUP_POOR_ROAD_TYPES and candidate["walkingDistanceMeters"] <= SMART_PICKUP_MAX_WALK_METERS
+        ]
+        if viable_alternatives:
+            candidate_entries = [
+                candidate
+                for candidate in candidate_entries
+                if candidate["isOriginal"] or candidate["roadType"] not in SMART_PICKUP_POOR_ROAD_TYPES
+            ]
+
+        evaluated_candidates: list[dict[str, Any]] = []
+        weather_multiplier = float(weather_context["multiplier"])
+        speed_kph = float(driver.get("speedKph") or PASSENGER_DRIVER_MODULE.DRIVER_SPEED_KPH)
+
+        for candidate in candidate_entries:
+            pickup_node = node_index.get(candidate["candidateId"])
+            if not pickup_node:
+                continue
+
+            pickup_path = self.run_a_star(driver_start_node.id, pickup_node.id, graph=graph, node_index=node_index)
+            trip_path = self.run_a_star(pickup_node.id, DROPOFF_POINT_NODE_ID, graph=graph, node_index=node_index)
+            if not pickup_path or not trip_path:
+                continue
+
+            start_offset_meters = PASSENGER_DRIVER_MODULE.service_distance(self, driver, driver_start_node)
+            pickup_distance_meters = pickup_path["distance"] + start_offset_meters
+            traffic_context = PASSENGER_DRIVER_MODULE.build_traffic_context(
+                self,
+                driver_start_node,
+                pickup_path,
+                pickup_distance_meters,
+                node_index,
+                weather_multiplier,
+            )
+            traffic_ratio = float(traffic_context["ratio"])
+            pickup_eta_minutes = PASSENGER_DRIVER_MODULE.get_eta_minutes(
+                pickup_distance_meters,
+                speed_kph,
+                traffic_ratio,
+                weather_multiplier,
+            )
+            direct_distance_meters = PASSENGER_DRIVER_MODULE.service_distance(
+                self,
+                driver,
+                {"lat": candidate["lat"], "lng": candidate["lng"]},
+            )
+            route_efficiency_score = clamp_value(direct_distance_meters / max(pickup_distance_meters, 1), 0.0, 1.0)
+            landmark_score, landmark_name = get_landmark_score(self.landmarks, candidate["lat"], candidate["lng"])
+            road_type_score = SMART_PICKUP_ROAD_TYPE_SCORES.get(candidate["roadType"], SMART_PICKUP_ROAD_TYPE_SCORES["unclassified"])
+            safety_score = SMART_PICKUP_SAFETY_SCORES.get(candidate["roadType"], SMART_PICKUP_SAFETY_SCORES["unclassified"])
+
+            evaluated_candidates.append(
+                {
+                    **candidate,
+                    "pickupPath": pickup_path,
+                    "tripPath": trip_path,
+                    "pickupDistanceMeters": pickup_distance_meters,
+                    "pickupEtaMinutes": pickup_eta_minutes,
+                    "trafficRatio": traffic_ratio,
+                    "trafficScore": clamp_value(traffic_ratio, 0.0, 1.0),
+                    "trafficSource": str(traffic_context["source"]),
+                    "trafficNotice": str(traffic_context["notice"]),
+                    "routeEfficiencyScore": route_efficiency_score,
+                    "roadTypeScore": road_type_score,
+                    "landmarkScore": landmark_score,
+                    "landmarkName": landmark_name,
+                    "safetyScore": safety_score,
+                }
+            )
+
+        if len(evaluated_candidates) < 2:
+            return {"suggested": False, "reason": "No better nearby pickup alternative was available."}
+
+        eta_values = [candidate["pickupEtaMinutes"] for candidate in evaluated_candidates]
+        eta_min = min(eta_values)
+        eta_max = max(eta_values)
+
+        for candidate in evaluated_candidates:
+            candidate["walkingScore"] = clamp_value(
+                1.0 - (candidate["walkingDistanceMeters"] / SMART_PICKUP_MAX_WALK_METERS),
+                0.0,
+                1.0,
+            )
+            candidate["driverEtaScore"] = PASSENGER_DRIVER_MODULE.inverse_relative_score(
+                candidate["pickupEtaMinutes"],
+                eta_min,
+                eta_max,
+            )
+            candidate["pickupScore"] = (
+                (candidate["walkingScore"] * 0.25)
+                + (candidate["driverEtaScore"] * 0.25)
+                + (candidate["roadTypeScore"] * 0.20)
+                + (candidate["trafficScore"] * 0.10)
+                + (candidate["routeEfficiencyScore"] * 0.10)
+                + (candidate["landmarkScore"] * 0.05)
+                + (candidate["safetyScore"] * 0.05)
+            )
+
+        evaluated_candidates.sort(
+            key=lambda candidate: (
+                -candidate["pickupScore"],
+                candidate["pickupEtaMinutes"],
+                candidate["walkingDistanceMeters"],
+            )
+        )
+
+        original_candidate = next(
+            candidate for candidate in evaluated_candidates if candidate["isOriginal"]
+        )
+        best_candidate = evaluated_candidates[0]
+        eta_improvement_minutes = max(0, original_candidate["pickupEtaMinutes"] - best_candidate["pickupEtaMinutes"])
+        road_type_improvement = best_candidate["roadTypeScore"] - original_candidate["roadTypeScore"]
+        original_poor_road = original_candidate["roadType"] in SMART_PICKUP_POOR_ROAD_TYPES or original_candidate["roadTypeScore"] <= 0.60
+
+        should_suggest = (
+            not best_candidate["isOriginal"]
+            and (
+                eta_improvement_minutes >= 1
+                or road_type_improvement >= 0.15
+                or original_poor_road
+            )
+        )
+
+        if not should_suggest:
+            return {
+                "suggested": False,
+                "reason": "The original pickup point is already suitable enough.",
+                "original": pickup_candidate_payload(original_candidate),
+            }
+
+        return {
+            "suggested": True,
+            "reason": build_pickup_recommendation_reason(
+                best_candidate,
+                eta_improvement_minutes,
+                road_type_improvement,
+                original_poor_road,
+            ),
+            "original": pickup_candidate_payload(original_candidate),
+            "recommended": pickup_candidate_payload(best_candidate),
+            "etaImprovementMinutes": eta_improvement_minutes,
+            "scoreImprovement": round(best_candidate["pickupScore"] - original_candidate["pickupScore"], 3),
+            "walkingDistanceMeters": best_candidate["walkingDistanceMeters"],
+        }
+
     def extract_boundary_rings(self, geometry: dict[str, Any]) -> list[list[list[float]]]:
         geometry_type = geometry.get("type")
         if geometry_type == "Polygon":
@@ -581,6 +850,8 @@ class OlongapoRouteService:
                 distance_to_segment=candidate["distance_to_segment"],
                 distance_from_start=candidate["distance_from_start"],
                 distance_to_end=candidate["distance_to_end"],
+                road_type=segment.road_type,
+                road_type_label=segment.road_type_label,
             )
 
             if best_snap is None or snapped.distance_to_segment < best_snap.distance_to_segment:
@@ -727,6 +998,8 @@ class OlongapoRouteService:
                 "fromNodeId": segment.from_node_id,
                 "toNodeId": segment.to_node_id,
                 "distance": segment.distance,
+                "roadType": segment.road_type,
+                "roadTypeLabel": segment.road_type_label,
                 "from": asdict(self.node_index[segment.from_node_id]),
                 "to": asdict(self.node_index[segment.to_node_id]),
             }
@@ -765,6 +1038,35 @@ def to_radians(value: float) -> float:
     return (value * math.pi) / 180
 
 
+def normalize_road_type(highway_value: Any) -> str:
+    if isinstance(highway_value, list):
+        highway_value = highway_value[0] if highway_value else ""
+    value = str(highway_value or "").strip().lower()
+    return value or "unclassified"
+
+
+def describe_road_type(highway_value: Any) -> str:
+    road_type = normalize_road_type(highway_value)
+    labels = {
+        "motorway": "motorway",
+        "motorway_link": "motorway link",
+        "trunk": "trunk road",
+        "trunk_link": "trunk link",
+        "primary": "primary road",
+        "primary_link": "primary link",
+        "secondary": "secondary road",
+        "secondary_link": "secondary link",
+        "tertiary": "tertiary road",
+        "tertiary_link": "tertiary link",
+        "residential": "residential road",
+        "living_street": "living street",
+        "unclassified": "unclassified road",
+        "service": "service road",
+        "road": "local road",
+    }
+    return labels.get(road_type, road_type.replace("_", " "))
+
+
 def project_point_onto_segment(point: Node, from_node: Node, to_node: Node, segment_distance: float) -> dict[str, float] | None:
     ref_lat = (point.lat + from_node.lat + to_node.lat) / 3
     meters_per_lat = 111320
@@ -790,6 +1092,108 @@ def project_point_onto_segment(point: Node, from_node: Node, to_node: Node, segm
         "distance_from_start": segment_distance * ratio,
         "distance_to_end": segment_distance * (1 - ratio),
     }
+
+
+def clone_graph_for_pickup_recommendation(service: OlongapoRouteService) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Node]]:
+    return (
+        {node_id: [dict(neighbor) for neighbor in neighbors] for node_id, neighbors in service.graph.items()},
+        dict(service.node_index),
+    )
+
+
+def add_temporary_snapped_point_to_graph(
+    service: OlongapoRouteService,
+    graph: dict[str, list[dict[str, Any]]],
+    node_index: dict[str, Node],
+    snapped: SnappedRoadPoint,
+    node_id: str,
+) -> None:
+    temp_node = Node(id=node_id, lat=snapped.lat, lng=snapped.lng)
+    graph[node_id] = []
+    node_index[node_id] = temp_node
+
+    from_node = node_index.get(snapped.from_node_id)
+    to_node = node_index.get(snapped.to_node_id)
+    if not from_node or not to_node:
+        return
+
+    if service.has_directed_edge(from_node.id, to_node.id):
+        graph.setdefault(from_node.id, []).append({"id": node_id, "distance": snapped.distance_from_start})
+        graph[node_id].append({"id": to_node.id, "distance": snapped.distance_to_end})
+
+    if service.has_directed_edge(to_node.id, from_node.id):
+        graph.setdefault(to_node.id, []).append({"id": node_id, "distance": snapped.distance_to_end})
+        graph[node_id].append({"id": from_node.id, "distance": snapped.distance_from_start})
+
+
+def clamp_value(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def get_landmark_score(landmarks: list[Landmark], lat: float, lng: float) -> tuple[float, str]:
+    query = Node(id="pickup-candidate", lat=lat, lng=lng)
+    nearest_name = ""
+    nearest_distance = float("inf")
+    for landmark in landmarks:
+        distance = haversine_distance(query, Node(id=landmark.id, lat=landmark.lat, lng=landmark.lng))
+        if distance < nearest_distance:
+            nearest_distance = distance
+            nearest_name = landmark.name
+
+    if nearest_distance <= 80:
+        return 1.0, nearest_name
+    if nearest_distance <= 150:
+        return 0.8, nearest_name
+    if nearest_distance <= 250:
+        return 0.55, nearest_name
+    return 0.2, nearest_name
+
+
+def pickup_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidateId": candidate["candidateId"],
+        "lat": candidate["lat"],
+        "lng": candidate["lng"],
+        "roadType": candidate["roadType"],
+        "roadTypeLabel": candidate["roadTypeLabel"],
+        "walkingDistanceMeters": candidate["walkingDistanceMeters"],
+        "pickupEtaMinutes": candidate["pickupEtaMinutes"],
+        "pickupDistanceMeters": candidate["pickupDistanceMeters"],
+        "trafficRatio": candidate["trafficRatio"],
+        "trafficSource": candidate["trafficSource"],
+        "trafficNotice": candidate["trafficNotice"],
+        "routeEfficiencyScore": candidate["routeEfficiencyScore"],
+        "roadTypeScore": candidate["roadTypeScore"],
+        "landmarkScore": candidate["landmarkScore"],
+        "landmarkName": candidate["landmarkName"],
+        "safetyScore": candidate["safetyScore"],
+        "walkingScore": candidate["walkingScore"],
+        "driverEtaScore": candidate["driverEtaScore"],
+        "trafficScore": candidate["trafficScore"],
+        "pickupScore": candidate["pickupScore"],
+        "pickupPath": candidate["pickupPath"],
+        "tripPath": candidate["tripPath"],
+    }
+
+
+def build_pickup_recommendation_reason(
+    candidate: dict[str, Any],
+    eta_improvement_minutes: int,
+    road_type_improvement: float,
+    original_poor_road: bool,
+) -> str:
+    reasons: list[str] = []
+    if eta_improvement_minutes >= 1:
+        reasons.append(f"cuts driver arrival by about {eta_improvement_minutes} min")
+    if road_type_improvement >= 0.15:
+        reasons.append(f"moves you onto a more pickup-friendly {candidate['roadTypeLabel']}")
+    if original_poor_road:
+        reasons.append("avoids a weak original pickup road type")
+    if candidate.get("landmarkName") and candidate.get("landmarkScore", 0) >= 0.55:
+        reasons.append(f"is easier to identify near {candidate['landmarkName']}")
+    if not reasons:
+        reasons.append("offers a stronger overall pickup score")
+    return "Suggested pickup point available because it " + ", ".join(reasons) + "."
 
 
 def reconstruct_path(came_from: dict[str, str], current_id: str, distance: float) -> dict[str, Any]:
@@ -1003,6 +1407,10 @@ class AppHandler(BaseHTTPRequestHandler):
             self.handle_traffic_samples(body)
             return
 
+        if parsed.path == "/api/smart-pickup-recommendation":
+            self.handle_smart_pickup_recommendation(body)
+            return
+
         if parsed.path == "/api/best-driver":
             self.handle_best_driver(body)
             return
@@ -1096,6 +1504,22 @@ class AppHandler(BaseHTTPRequestHandler):
                     "liveTrafficEnabled": SERVICE.has_live_traffic_enabled(),
                 }
             )
+        except Exception as error:  # noqa: BLE001
+            self.respond_error_payload(error)
+
+    def handle_smart_pickup_recommendation(self, body: dict[str, Any]) -> None:
+        try:
+            pickup = body["pickup"]
+            dropoff = body["dropoff"]
+            driver = body["driver"]
+            result = SERVICE.recommend_pickup_point(
+                original_pickup_lat=float(pickup["lat"]),
+                original_pickup_lng=float(pickup["lng"]),
+                dropoff_lat=float(dropoff["lat"]),
+                dropoff_lng=float(dropoff["lng"]),
+                driver=driver,
+            )
+            self.respond_json(result)
         except Exception as error:  # noqa: BLE001
             self.respond_error_payload(error)
 

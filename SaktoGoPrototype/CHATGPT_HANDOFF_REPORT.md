@@ -1,345 +1,466 @@
 # ChatGPT Handoff Report
 
 Date: 2026-05-22
-Project: SaktoGov3 / Olongapo Route Finder
+Project: SaktoGoPrototype / Olongapo Ride-Matching Demo
 
 ## 1. Executive Summary
 
-This app is currently a working ride-request and route-visualization demo focused on Olongapo City. It combines:
+`SaktoGoPrototype` is the current canonical app folder. It contains a working ride-request, route-visualization, and driver-simulation demo centered on Olongapo City.
 
-- a single-page frontend in [index.html](/E:/SaktoGov3/index.html:1), [app.js](/E:/SaktoGov3/app.js:1), and [styles.css](/E:/SaktoGov3/styles.css:1)
-- a lightweight Python backend in [app.py](/E:/SaktoGov3/app.py:1)
-- a dedicated intelligent matching module in [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:1)
+The system is built from:
 
-The "intelligent system" is not machine learning. It is a deterministic, rule-based, multi-factor driver ranking engine that uses road-graph routing, weather impact, time-of-day traffic estimation, driver quality attributes, and movement behavior to choose the best driver for a passenger request.
+- a single-page frontend in [index.html](/E:/SaktoGov3/SaktoGoPrototype/index.html:1), [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:1), and [styles.css](/E:/SaktoGov3/SaktoGoPrototype/styles.css:1)
+- a Python standard-library backend in [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:1)
+- a dedicated passenger-driver intelligent matching module in [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:1)
 
-The app already supports:
+The intelligent matching is not machine learning. It is a deterministic, explainable, weighted scoring system that ranks candidate drivers using road-network routing, live traffic when available, live weather when available, driver quality attributes, and movement behavior.
 
-- map-based pickup and drop-off selection
-- OSM-based road graph creation for Olongapo
-- A* routing on the local graph
-- simulated drivers with live movement on the map
-- intelligent driver ranking through a backend endpoint
-- browser-side fallback ranking if backend matching is unavailable
-- user mode and admin mode UIs
+The most important current-state points are:
+
+- the backend matcher is intended to be the primary source of truth
+- live TomTom traffic is the primary traffic input for passenger-driver matching
+- live Open-Meteo weather is the primary weather input
+- heuristic traffic and fallback weather behavior remain as graceful fallback paths
+- the user-mode phone UI now has its own in-phone “Finding the best driver” loading overlay
 
 ## 2. Current Architecture
 
 ### Frontend
 
-The frontend lives mostly in [app.js](/E:/SaktoGov3/app.js:1) and is responsible for:
+The frontend in [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:1) is responsible for:
 
-- loading or receiving the Olongapo boundary, road graph, landmarks, and weather
 - rendering the Leaflet map and UI
-- simulating 100 drivers
-- handling user pickup/drop-off selection
-- calling the backend intelligent matcher when available
-- falling back to browser-side driver ranking when needed
+- running the simulated fleet
+- handling pickup/drop-off selection
+- calling the backend for intelligent matching
+- showing route, weather, and traffic summaries
+- using browser-side ranking only as an emergency fallback
 
 Important frontend entry points:
 
-- startup and backend/browser mode selection: [app.js](/E:/SaktoGov3/app.js:840)
-- backend intelligent matching request: [app.js](/E:/SaktoGov3/app.js:1793)
-- browser-side ranking fallback: [app.js](/E:/SaktoGov3/app.js:1925)
-- ranked offer presentation: [app.js](/E:/SaktoGov3/app.js:2177)
-- driver lifecycle after acceptance: [app.js](/E:/SaktoGov3/app.js:2373) and [app.js](/E:/SaktoGov3/app.js:3235)
+- intelligent-match request: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:1912)
+- matcher source badges rendering: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:667)
+- phone-only match loading overlay logic: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:330)
+- pickup/drop-off traffic loading: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:3926)
+- route traffic summary loading: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:3953)
+- backend traffic proxy caller: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:4037)
+- traffic formatter: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:4093)
 
 ### Backend
 
-The backend in [app.py](/E:/SaktoGov3/app.py:1) is a standard-library HTTP server. It:
+The backend in [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:1) is a lightweight HTTP server that:
 
-- bootstraps the city boundary, road network, landmarks, and weather
-- builds and stores the routable graph in memory
-- exposes API routes for bootstrap, weather, routing, snapping, and intelligent matching
-- imports the intelligent matching logic from `passenger-driver.py`
+- bootstraps Olongapo map data and landmarks
+- builds and stores an in-memory routable road graph
+- loads live weather
+- looks up live traffic from TomTom
+- exposes routing and matching APIs
+- delegates intelligent ranking to `passenger-driver.py`
 
 Important backend pieces:
 
-- dynamic import of the matcher module: [app.py](/E:/SaktoGov3/app.py:44)
-- route service class: [app.py](/E:/SaktoGov3/app.py:84)
-- graph build: [app.py](/E:/SaktoGov3/app.py:215)
-- landmark build: [app.py](/E:/SaktoGov3/app.py:270)
-- A* routing: [app.py](/E:/SaktoGov3/app.py:404)
-- intelligent ranking bridge: [app.py](/E:/SaktoGov3/app.py:486)
-- bootstrap payload: [app.py](/E:/SaktoGov3/app.py:505)
-- intelligent match endpoint handler: [app.py](/E:/SaktoGov3/app.py:801)
+- default TomTom fallback key constant: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:28)
+- live weather loader: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:206)
+- live traffic capability check: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:232)
+- single-point live traffic lookup: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:235)
+- batched live traffic lookup: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:289)
+- A* routing: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:620)
+- intelligent ranking bridge: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:702)
+- bootstrap payload: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:721)
+- intelligent match endpoint: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:1063)
+- traffic sample endpoint: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:1086)
 
 ### Intelligent Matcher Module
 
-The main passenger-driver intelligence is isolated in [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:1). The primary entry point is:
+The main intelligent system is isolated in [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:1). The primary entry point is:
 
-- driver ranking entry: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:19)
+- ranking entry: [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:20)
 
-This is the best file to inspect if the goal is to improve the decision logic.
+This file currently contains the core logic for:
 
-## 3. Current Intelligent System State
+- candidate filtering
+- route-aware driver evaluation
+- traffic and weather context building
+- ETA calculation
+- weighted score calculation
+- explanation generation
+- debug field generation
 
-### What It Actually Does
+## 3. Passenger-Driver Matching: Current State
 
-For a passenger request, the matcher:
+### End-To-End Flow
 
-1. Ensures the road graph and landmarks are loaded.
-2. Snaps the pickup and drop-off coordinates onto the routable road network.
-3. Clones the base graph and injects temporary pickup and drop-off nodes.
-4. Uses A* to verify there is a connected route between pickup and drop-off.
-5. Filters drivers by vehicle type, availability state, and radius.
-6. Expands the search radius from 3 km to 5 km if needed.
-7. Builds a baseline "nearest eligible driver" for comparison.
-8. Evaluates each eligible driver using route-based and quality-based features.
-9. Applies a weighted final score.
-10. Sorts candidates, ranks them, and returns a human-readable selection reason.
+The current backend-first ride-matching flow is:
 
-### Eligibility Rules
+1. The frontend collects ride type, pickup, and drop-off.
+2. The frontend sends the request to `/api/intelligent-match`.
+3. The backend snaps pickup and drop-off onto the road graph.
+4. The backend verifies a valid A* route exists.
+5. The matcher filters nearby eligible drivers.
+6. Each candidate driver is evaluated using route distance, traffic, weather, driver attributes, and movement behavior.
+7. The backend returns ranked suggestions, explanation text, source metadata, and debug breakdowns.
+8. The frontend displays the suggested driver, source badges, and explanation.
+9. If backend matching is unavailable, the browser can still rank drivers in `browser_fallback` mode, but that path is explicitly secondary.
 
-Current eligibility rules in [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:224):
+### Candidate Filtering
 
-- driver type must match requested vehicle type
-- driver must not be `lockedToUser`
-- driver must not be `heldForOffer`
-- driver status must be `standby_available` or `moving_available`
-- straight-line distance from driver to pickup must be within the active radius
+Current filtering behavior is still preserved:
 
-The system checks `3000 m` first, then `5000 m`.
+- selected vehicle type only
+- `standby_available` or `moving_available` only
+- exclude locked and held drivers
+- exclude `assigned_pickup`, `assigned_ontrip`, and inactive drivers by status gate
+- search within `3 km` first
+- expand to `5 km` if needed
+- skip drivers that do not produce a valid A* pickup route
 
-### Candidate Evaluation Features
+Filtering and evaluation are centered in [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:282).
 
-The candidate scoring path is implemented mainly in:
+### Scoring Formula
 
-- weather context: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:191)
-- candidate evaluation: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:254)
-- route-start selection: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:308)
-- relative scoring: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:335)
-- explanation generation: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:353)
+The current final weighted score is:
 
-Each candidate currently uses these signals:
+```text
+final_score =
+  distance_score * 0.30 +
+  traffic_score * 0.20 +
+  weather_score * 0.10 +
+  rating_score * 0.10 +
+  cancellation_score * 0.10 +
+  route_efficiency_score * 0.15 +
+  movement_score * 0.05
+```
 
-- routed pickup distance
-- direct distance to pickup
-- estimated traffic ratio
-- weather multiplier
-- driver rating
-- cancellation rate
-- route efficiency
-- movement score
-- pickup ETA
-- trip ETA
+This is applied in [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:385).
 
-Important detail: ETA is calculated and shown to the user, but it is explicitly not scored directly.
+### What Each Score Uses
 
-### Final Weighted Score
+`distance_score`
 
-Current final score weights in [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:335):
+- uses local A* route distance on the in-memory OSM-based road graph
+- not a live external API at scoring time
 
-- distance score: `0.30`
-- traffic score: `0.20`
-- weather score: `0.10`
-- rating score: `0.10`
-- cancellation score: `0.10`
-- route efficiency score: `0.15`
-- movement score: `0.05`
+`traffic_score`
 
-This means the current system is most driven by pickup distance and traffic-adjusted quality, with reliability and route shape as secondary factors.
+- primary source: TomTom live traffic
+- fallback: heuristic traffic estimation
+- current route traffic context builder: [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:451)
 
-### Traffic Model
+`weather_score`
 
-Backend traffic is currently heuristic, not live. In [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:371), the system estimates traffic ratio from:
+- primary source: Open-Meteo live weather
+- fallback: neutral/default weather behavior
+- current weather context builder: [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:211)
 
-- time of day in `Asia/Manila`
-- pickup distance penalty
-- weather penalty
+`rating_score`
 
-This is a rule-based congestion estimate, not a real traffic API lookup.
+- simulated driver rating from the frontend fleet model
+- not a live API
 
-By contrast, the browser fallback ranking in [app.js](/E:/SaktoGov3/app.js:2030) and [app.js](/E:/SaktoGov3/app.js:2074) can use live TomTom traffic samples if the API key is present.
+`cancellation_score`
 
-### Weather Model
+- simulated driver cancellation rate from the frontend fleet model
+- not a live API
 
-Weather impact is currently based on:
+`route_efficiency_score`
 
-- precipitation
-- wind speed
-- weather code severity
+- local routing/geometric comparison between direct distance and actual routed pickup distance
+- not a live API
 
-Backend weather scoring logic: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:191)
+`movement_score`
 
-The weather multiplier is used to worsen effective speed and weaken the weather score under poor conditions.
+- based on driver state and motion direction within the simulation
+- not a live API
+- movement logic: [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:548)
 
-### Movement Model
+## 4. Live Environment Data In Matching
 
-The system gives a better movement score when:
+### Traffic: TomTom Is Primary
 
-- the driver is on standby in a stable position
-- or the driver is already moving in a direction that reduces distance to the pickup
+Live traffic is now handled in the backend and fed into the matcher consistently.
 
-Current movement logic: [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:394)
+Backend traffic capability:
 
-### Explanation Output
+- env-var-first key selection with demo fallback key in code
+- live traffic enabled check: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:232)
+- TomTom lookup helpers: [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:235) and [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:289)
 
-The matcher already returns human-readable reasoning. It explains:
+Matcher traffic behavior:
 
-- whether the driver is also the nearest baseline option
-- traffic condition quality
-- weather impact level
-- routed pickup distance
-- route efficiency
-- driver rating
-- cancellation risk
-- movement behavior
+- candidate pickup routes are sampled along the route
+- the matcher asks the backend service for live traffic samples
+- `trafficRatio` is derived from `currentSpeed / freeFlowSpeed`
+- ratios are clamped to a safe range
+- road closures are heavily penalized
+- if live data is unavailable, the matcher falls back gracefully to the heuristic estimator
 
-This is useful because the intelligence is not a black box; it is explainable.
+Core traffic logic:
 
-## 4. Driver Simulation State
+- traffic context builder: [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:451)
+- heuristic fallback estimator: [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:524)
 
-The frontend simulation is fairly developed.
+Result metadata now includes:
 
-Current simulation constants in [app.js](/E:/SaktoGov3/app.js:15):
+- `trafficSource`
+- `trafficNotice`
+- `trafficSamplesUsed`
 
-- total drivers: `100`
-- cars: `60`
-- motorcycles: `40`
-- nominal speed: `25 kph`
+Aggregate source/notice helpers:
 
-Driver initialization begins at [app.js](/E:/SaktoGov3/app.js:2807).
+- [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:637)
+- [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:641)
 
-Driver statuses currently include:
+Current traffic source values are:
 
-- `inactive`
-- `standby_available`
-- `moving_available`
-- `assigned_pickup`
-- `assigned_ontrip`
+- `tomtom_live`
+- `heuristic_fallback`
 
-The simulation also includes:
+### Weather: Open-Meteo Is Primary
 
-- deterministic seeded mock randomness
-- weighted landmark-based standby placement
-- landmark-to-landmark repositioning
-- time-of-day active driver target changes
-- state transitions from standby to pickup to on-trip and back to standby
+Weather is still loaded by the backend and used by the matcher as the main weather input.
 
-The arrival logic for matched rides is in [app.js](/E:/SaktoGov3/app.js:3235).
+Backend weather loader:
 
-## 5. Current User Flow
+- [app.py](/E:/SaktoGov3/SaktoGoPrototype/app.py:206)
 
-The current user-facing ride flow is:
+Matcher weather behavior:
 
-1. Choose `User` or `Admin` mode.
-2. Choose ride type: car or motorcycle.
-3. Tap the map to set pickup.
-4. Tap the map to set drop-off.
-5. The app automatically ranks nearby drivers.
-6. The user can accept the suggested driver, request another ranked driver, or cancel.
-7. After acceptance, the selected simulated driver moves to the pickup.
-8. After pickup, the same driver moves along the trip path to the drop-off.
+- uses live weather when available
+- computes weather severity and multiplier
+- uses fallback behavior if weather is unavailable
 
-This flow is already integrated end-to-end across frontend, backend, and simulation.
+Current weather context builder:
 
-## 6. Current Strengths
+- [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:211)
 
-- The intelligent matching logic is separated into its own Python module, which makes it easier to iterate on.
-- The system uses a real routable road graph rather than pure straight-line matching.
-- Pickup and drop-off are snapped to actual road segments before routing.
-- The matching result is explainable and not just a raw score.
-- There is a working browser fallback if backend matching is unavailable.
-- The driver simulation is rich enough to demonstrate dispatch, pickup, trip, and return-to-standby behavior.
-- The app already exposes useful backend APIs for future expansion.
+Current weather source values are:
 
-## 7. Current Limitations And Risks
+- `open_meteo_live`
+- `weather_fallback`
 
-### 7.1 Intelligence Is Heuristic, Not ML
+Result metadata now includes:
 
-The current "AI" is actually a hand-crafted scoring system. It does not learn from data, historical trips, acceptance behavior, or real demand patterns.
+- `weatherSource`
+- `weatherNotice`
 
-### 7.2 Frontend And Backend Ranking Logic Are Duplicated
+## 5. ETA Composition
 
-There is now a Python ranking implementation in [passenger-driver.py](/E:/SaktoGov3/passenger-driver.py:19) and a parallel browser ranking implementation in [app.js](/E:/SaktoGov3/app.js:1925). They are conceptually aligned, but this creates drift risk.
+ETA is still calculated and displayed, but it is not directly part of the weighted score.
 
-### 7.3 Traffic Logic Differs By Execution Path
+ETA calculation:
 
-- Backend matching uses a heuristic traffic estimator.
-- Browser fallback ranking can use live TomTom samples.
+- [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:542)
 
-Because of this, the same request can rank drivers differently depending on which execution path is active.
+The ETA is composed from:
 
-### 7.4 No Persistence
+- route distance
+- driver speed
+- traffic effect
+- weather effect
 
-There is no database. Everything is in memory:
+More specifically:
 
-- no saved drivers
-- no trip history
-- no request history
-- no analytics
-- no user accounts
+- `distance_meters`
+  - comes from the local A* route on the road graph
+- `speed_kph`
+  - comes from the simulated driver state
+- `traffic_ratio`
+  - comes from TomTom live traffic when available, otherwise heuristic fallback
+- `weather_multiplier`
+  - comes from Open-Meteo live weather when available, otherwise fallback weather behavior
 
-Restarting the app resets the world.
+So ETA is only partially real-API-based:
 
-### 7.5 No Test Suite
+- real API component: traffic
+- real API component: weather
+- non-API component: route distance
+- non-API component: simulated driver speed
 
-I confirmed the Python files compile, but there is no visible automated test suite for:
+## 6. Matching Output And Explainability
 
-- route graph correctness
-- matcher correctness
-- scoring regressions
-- frontend ranking parity
+For each result, the backend can provide:
 
-### 7.6 External Dependency Fragility
+- selected driver
+- pickup and trip ETAs
+- final score
+- explanation text
+- `matchingMode`
+- `trafficSource`
+- `trafficNotice`
+- `weatherSource`
+- `weatherNotice`
+- per-driver `scoreBreakdown`
+- per-driver `debug`
 
-The app depends on live third-party services:
+Important matching output behavior:
 
+- backend-primary results use `matchingMode: "backend_primary"`
+- browser emergency fallback uses `matchingMode: "browser_fallback"`
+
+The explanation generator is in [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:426).
+
+The relative weighted scores are applied in [passenger-driver.py](/E:/SaktoGov3/SaktoGoPrototype/passenger-driver.py:385).
+
+## 7. Frontend Matching Behavior
+
+### Backend Is Intended Source Of Truth
+
+The frontend calls `/api/intelligent-match` first and treats the backend result as primary:
+
+- [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:1912)
+
+If backend matching fails or is unavailable, the browser still has an emergency fallback path. That fallback is clearly marked as browser fallback mode in the returned offer payloads.
+
+### Source Visibility In The UI
+
+The suggested driver card has explicit matcher-source badges:
+
+- markup: [index.html](/E:/SaktoGov3/SaktoGoPrototype/index.html:127)
+- styles: [styles.css](/E:/SaktoGov3/SaktoGoPrototype/styles.css:446)
+- render logic: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:667)
+
+These badges distinguish:
+
+- backend primary vs browser fallback
+- TomTom live traffic vs heuristic fallback
+- Open-Meteo live weather vs fallback
+
+### Traffic Cards And Route Summaries
+
+Pickup, drop-off, and route traffic summaries use backend traffic sampling rather than direct frontend TomTom calls:
+
+- point traffic: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:3926)
+- route traffic: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:3953)
+- backend traffic proxy fetch: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:4037)
+
+The traffic summary formatter was also adjusted so road-closure messaging is clearer:
+
+- [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:4093)
+
+### User-Mode Loading Experience
+
+When the user is in phone mode and the app is ranking candidates, the loading animation now appears inside the phone screen rather than over the whole browser window:
+
+- phone overlay markup: [index.html](/E:/SaktoGov3/SaktoGoPrototype/index.html:45)
+- styles: [styles.css](/E:/SaktoGov3/SaktoGoPrototype/styles.css:1042)
+- show/hide logic: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:330) and [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:346)
+- ranking trigger: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:1852)
+
+### Debug Output
+
+Browser debug logging for candidate details is gated behind:
+
+- `?debugMatch=1`
+- switch: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:11)
+
+This avoids constant console spam during normal use while still exposing scoring details when needed.
+
+## 8. Driver Simulation And Ride Lifecycle
+
+The app still has a fairly rich simulated fleet. Driver initialization remains in the frontend:
+
+- driver creation uses simulated rating and cancellation behavior
+- rating builder: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:3724)
+- cancellation builder: [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:3728)
+
+Drivers still move through the expected lifecycle:
+
+- available standby
+- moving available
+- assigned to pickup
+- assigned on-trip
+- released back into general simulation after drop-off
+
+This means the recent intelligent matching changes did not replace the original ride flow. They improved how the best driver is chosen, explained, and presented.
+
+## 9. Route Alignment / Suggested Driver Preview
+
+One recent frontend fix addressed a route-preview mismatch where the suggested driver’s preview could appear slightly off the expected street alignment.
+
+Current sync step:
+
+- [app.js](/E:/SaktoGov3/SaktoGoPrototype/app.js:2477)
+
+This resynchronizes the pending suggested driver with the held driver state before drawing the preview, so the driver-to-pickup route should better match the actual road-network start point used by the simulation.
+
+## 10. Current Strengths
+
+- The intelligent matcher is cleanly separated into its own Python module.
+- Passenger-driver matching is now backend-first instead of split across unrelated live-traffic code paths.
+- TomTom live traffic is integrated into the backend matching path.
+- Open-Meteo weather remains integrated into the backend matching path.
+- The matching output is explainable and includes explicit source metadata.
+- The UI makes backend-vs-fallback mode more visible.
+- The user-mode phone UI has a better localized loading experience during matching.
+- The driver simulation and ride lifecycle are already integrated end-to-end.
+- The road graph and routing approach are more realistic than straight-line-only matching.
+
+## 11. Current Limitations And Risks
+
+### 11.1 Still Rule-Based, Not Learned
+
+The system is still an explainable heuristic scorer, not a trained ML model. It does not learn from historical trips, acceptance behavior, supply-demand patterns, or real operational KPIs.
+
+### 11.2 Browser Fallback Still Exists
+
+The backend is the intended source of truth, but there is still fallback ranking logic in the browser. That is useful for resilience, but it still creates maintenance drift risk over time.
+
+### 11.3 External API Reliability Still Matters
+
+Live behavior depends on external services such as:
+
+- TomTom
+- Open-Meteo
 - Nominatim
 - Overpass
-- Open-Meteo
-- TomTom traffic
-- OpenStreetMap tiles
+- OSM tile/CDN sources
 
-If any of these are slow, blocked, or rate-limited, startup or matching quality can degrade.
+The app now fails more gracefully than before, but it is still sensitive to network issues, quotas, and third-party downtime.
 
-### 7.7 Exposed TomTom API Key
+### 11.4 TomTom Key Handling Is Demo-Friendly, Not Production-Safe
 
-There is currently a hard-coded TomTom key in the frontend at [app.js](/E:/SaktoGov3/app.js:7). This is fine for demo use but not safe for public deployment.
+The backend prefers `TOMTOM_API_KEY` from the environment, but there is also a code-level fallback key for convenience/demo use. That makes local sharing easier, but it is not appropriate for production or public repository exposure.
 
-### 7.8 Fallback Weather Scoring Gap
+### 11.5 No Persistence
 
-When the app is running in Python-backend mode, frontend weather state is reduced to a summary string plus multiplier `1` in [app.js](/E:/SaktoGov3/app.js:3569). If the backend intelligent endpoint were unavailable and the app fell back to browser-side ranking during that same session, the fallback scorer would not retain the richer backend weather multiplier logic.
+The app still runs entirely in memory:
 
-This is a smaller issue than the traffic drift, but it is worth noting.
+- no trip database
+- no driver database
+- no user accounts
+- no historical analytics
 
-### 7.9 Repo Hygiene
+Restarting resets the state.
 
-Current git status shows:
+### 11.6 No Formal Regression Test Suite
 
-- modified tracked file: `__pycache__/passenger-driver.cpython-313.pyc`
-- untracked file: `.gitignore`
+The code structure is inspectable and the scripts can be syntax-checked, but there is still no visible automated regression coverage for:
 
-That suggests generated bytecode is still part of the repo history or at least not fully cleaned up yet.
+- matching logic
+- route correctness
+- source/fallback behavior
+- backend/browser parity
 
-## 8. Recommended Next Priorities
+## 12. Best Short Description For Another ChatGPT Session
 
-If the goal is to improve the intelligent system, the most useful next steps are:
+Use this description:
 
-1. Make the Python matcher the single source of truth and reduce frontend/backend drift.
-2. Move live traffic lookup into the backend so ranking logic uses one traffic model everywhere.
-3. Add a small regression test set for driver ranking scenarios.
-4. Externalize secrets like the TomTom API key.
-5. Add persistence if the project is moving beyond demo status.
-6. Decide whether future intelligence should stay heuristic or move toward data-driven scoring.
+"This is an Olongapo ride-matching and route-visualization demo. The current canonical app folder is `SaktoGoPrototype`. The frontend is a Leaflet single-page app with a simulated driver fleet, a phone-style user UI, and a ride lifecycle from suggestion to pickup to drop-off. The backend is a Python HTTP server that loads OSM-based road data, builds an in-memory routable graph, fetches live weather from Open-Meteo, and fetches live traffic from TomTom. The main intelligent matching logic is in `passenger-driver.py`. It ranks candidate drivers with a deterministic weighted formula using routed pickup distance, live-traffic-derived traffic score, live-weather-derived weather score, rating, cancellation risk, route efficiency, and movement behavior. ETA is computed from route distance, simulated speed, traffic ratio, and weather multiplier, but ETA is not directly scored. The backend is the intended source of truth, and the frontend only falls back to browser ranking in emergency `browser_fallback` mode. Matching results expose `trafficSource`, `weatherSource`, notices, score breakdowns, and debug details." 
 
-## 9. Best Short Description For Another ChatGPT Session
+## 13. Validation Status
 
-You can describe the project like this:
+What was validated directly in source:
 
-"This is a ride-matching and route-finding demo for Olongapo City. The frontend is a Leaflet single-page app with user/admin modes and a simulated 100-driver fleet. The backend is a Python standard-library HTTP server that loads OSM roads, landmarks, and weather, builds an in-memory routable graph, and exposes intelligent driver matching APIs. The core intelligent logic is in `passenger-driver.py`, where a rule-based multi-factor scorer ranks drivers using routed pickup distance, heuristic traffic, weather impact, driver rating, cancellation risk, route efficiency, and movement behavior. ETA is displayed but not directly scored. There is also a browser fallback ranking path in `app.js`, but it duplicates the backend logic and can diverge, especially because frontend fallback may use live TomTom traffic while the backend currently uses a heuristic traffic ratio." 
+- backend live weather flow exists
+- backend live TomTom traffic flow exists
+- `/api/traffic-samples` route exists in code
+- passenger-driver matching contains live traffic and weather source metadata
+- frontend exposes matcher source badges and browser fallback labeling
+- point and route traffic UI call the backend traffic proxy
+- the phone-mode match loading overlay exists in the current UI
 
-## 10. Validation Status
+What was not fully revalidated in this report update:
 
-What I validated directly:
-
-- Python files compile successfully: `python -m py_compile app.py passenger-driver.py`
-- backend/frontend structure and intelligent matching flow were inspected directly in source
-
-What I did not fully validate in this pass:
-
-- live API behavior against Nominatim, Overpass, Open-Meteo, and TomTom
-- end-to-end browser interaction runtime
-- parity between backend ranking and frontend fallback ranking in live scenarios
-
+- live third-party API success at runtime in this environment
+- full browser interaction from cold boot through completed ride
+- exact parity across every edge case between backend-primary and browser fallback behavior
